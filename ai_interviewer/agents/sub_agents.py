@@ -11,13 +11,17 @@ This module implements a true multi-agent hierarchy:
 
 All agents use LangChain's create_agent() pattern.
 """
-
-from langchain_openai import ChatOpenAI
+import os
+from langchain_openai import ChatOpenAI , OpenAIEmbeddings
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
+from langchain_community.vectorstores import FAISS
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing import Dict, Any, Optional, List, Callable
 import logging
+from docx import Document
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
 import json
@@ -60,30 +64,50 @@ Return JSON with: required_skills, preferred_skills, experience_required, respon
 Analyze skill gaps, experience match, and provide interview focus areas.""",
 
     # KB Search Agent and its tools
-    "kb_search_agent": """
-You are a Knowledge Base Search Agent (Deep Agent) for interview question generation.
+     "kb_search_agent": """
+You are a highly intelligent and specialized Knowledge Base Search Agent for an AI Interviewer system. Your mission is to retrieve the most relevant, diverse, and comprehensive information from available knowledge bases to assist in generating precise interview questions for *any* job role.
 
-You have access to the following tools:
-1. vector_search - Search vector database for similar questions/topics
-2. keyword_search - Search by specific keywords or technologies
-3. topic_lookup - Find question templates by topic area
+You have access to the following powerful tools, each designed for a specific type of information retrieval:
 
-Your job:
-1. Based on candidate profile and job requirements, determine what to search
-2. Use vector_search for semantic similarity
-3. Use keyword_search for specific technologies
-4. Use topic_lookup to find relevant question templates
+1.  **list_available_knowledge_bases()**:
+    *   **Purpose**: Discover which knowledge bases are currently available. You **MUST** call this tool first to understand your searchable domains.
+    *   **Returns**: A JSON string listing available KBs and their general roles (e.g., `[{"name": "Openshift ", "role": "Cloud Platform"}, {"name": "AI&ML", "role": "Artificial Intelligence & Machine Learning"}]`).
+    *   **How to Use**: `list_available_knowledge_bases()`
 
-Return relevant questions, topics, and concepts for interview generation.
+2.  **vector_search(input_json: str)**:
+    *   **Purpose**: Ideal for **semantic search** and exploring broad concepts, definitions, high-level principles, or when the exact phrasing isn't known. Use this when you need content that is *conceptually similar* to your query, even if the keywords don't precisely match. Excellent for understanding "what is X" or "how does Y work" at a deeper level.
+    *   **Input**: A JSON string with two fields:
+        *   `kb_name` (string): The name of the knowledge base to search (e.g., "Openshift ", "AI&ML").
+        *   `query_text` (string): The conceptual question or topic you want to find semantically similar information for.
+    *   **How to Use**: `vector_search('{"kb_name": "Openshift ", "query_text": "Explain Kubernetes pod scheduling."}')`
+
+3.  **keyword_search(input_json: str)**:
+    *   **Purpose**: Best for finding content related to **specific named entities, technologies, versions, frameworks, commands, or exact terms**. This tool is optimized to surface documents containing or closely related to the *precise keywords* you provide. Use this when you have very specific terms you want to match, like "OpenShift CLI commands", "Kubernetes networking policies", or "Python troubleshooting".
+    *   **Input**: A JSON string with two fields:
+        *   `kb_name` (string): The name of the knowledge base to search.
+        *   `keywords_list` (string): A comma-separated string of exact keywords or technical terms you are looking for.
+    *   **How to Use**: `keyword_search('{"kb_name": "Openshift ", "keywords_list": "oc debug, StatefulSets, Ingress Controller"}' )`
+
+4.  **topic_lookup(input_json: str)**:
+    *   **Purpose**: Designed to retrieve **structured question templates, common interview topics, or pre-curated content blocks** associated with recognized subject areas. Use this when you can clearly identify a well-defined subject category (e.g., "Containerization", "Networking fundamentals", "Troubleshooting scenarios", "System Design patterns").
+    *   **Input**: A JSON string with two fields:
+        *   `kb_name` (string): The name of the knowledge base to search.
+        *   `topic_name` (string): The name of the topic category you are interested in.
+    *   **How to Use**: `topic_lookup('{"kb_name": "Openshift ", "topic_name": "OpenShift Installation & Configuration"}' )`
+
+Your Job Workflow for any search request from the Question & Answer Generator Agent:
+
+1.  **Understand the Request**: Carefully analyze the incoming request (e.g., candidate's skills, job requirements, desired focus areas).
+2.  **Identify Relevant Knowledge Base(s)**: First, call `list_available_knowledge_bases()` to see your options. Based on the job role and candidate profile, select the most appropriate KB (e.g., "Openshift " for an OpenShift role).
+3.  **Strategic Multi-Tool Application**: Plan your search by considering what type of information each tool is best suited for. You **MUST strive to use a combination of these tools** to get a comprehensive understanding:
+    *   **Start with `topic_lookup`**: If the request clearly points to specific subject areas (e.g., "networking", "security", "troubleshooting"), use `topic_lookup` to get foundational questions or templates.
+    *   **Then use `keyword_search`**: For explicit technologies, commands, or specific features mentioned in the resume or job description (e.g., "Prometheus", "Helm charts", "oc rsh", "Python", "GPT-3"), use `keyword_search`.
+    *   **Complement with `vector_search`**: For broader conceptual understanding, definitions, architectural principles, or related ideas that might not be exact keywords or topics (e.g., "scalability patterns in OpenShift", "ethical considerations in AI", "best practices for cloud migration"), use `vector_search`.
+    *   **Iterate**: If one tool doesn't yield sufficient results, try rephrasing your query for another tool, or use a different tool altogether for the same concept.
+4.  **Synthesize and Structure**: Combine the diverse results from all successful tool calls into a unified, coherent, and highly informative output. Do not just return raw tool outputs. Ensure the information is well-organized and directly supports the generation of varied interview questions (technical, conceptual, scenario-based).
+
+Your final output should be a rich compilation of relevant questions, topics, concepts, and technical details to empower the Question & Answer Generator.
 """,
-    "vector_search": """Search vector database using semantic similarity.
-Input: query text. Returns: similar questions and topics from knowledge base.""",
-
-    "keyword_search": """Search knowledge base by exact keywords.
-Input: keywords list. Returns: matching content.""",
-
-    "topic_lookup": """Find question templates by topic category.
-Input: topic name. Returns: question templates and examples.""",
 
     # Web Search Agent and its tools
     "web_search_agent": """
@@ -408,6 +432,14 @@ def create_candidate_analysis_agent(
 # ==========================================
 # KB SEARCH AGENT & TOOLS (Deep Agent)
 # ==========================================
+from functools import lru_cache
+# Base directory for all knowledge bases
+BASE_KNOWLEDGE_BASES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'knowledge_bases') # Ensure this matches your project structure
+
+def get_faiss_index_path(kb_name: str) -> str:
+    """Constructs the path to the FAISS index for a given knowledge base name."""
+    sanitized_kb_name = kb_name.replace(" ", "_").lower()
+    return os.path.join(BASE_KNOWLEDGE_BASES_DIR, sanitized_kb_name, "faiss_index")
 
 def create_kb_search_agent(
     llm: ChatOpenAI,
@@ -419,128 +451,182 @@ def create_kb_search_agent(
     Create KB Search Agent (Deep Agent with multiple search tools).
 
     This agent has 3 tools for knowledge base search:
-    - vector_search (semantic similarity)
-    - keyword_search (exact match)
-    - topic_lookup (category-based)
+    1. list_available_knowledge_bases (to discover KBs)
+    2. vector_search (semantic similarity on a chosen KB)
+    3. keyword_search (exact match on a chosen KB)
+    4. topic_lookup (category-based on a chosen KB)
     """
-    logger.info("Creating KB Search Agent (Deep Agent)...")
+    logger.info("Creating KB Search Agent (Deep Agent) with dynamic KB selection...")
+
+    # Initialize Embeddings once for use by search tools
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+
+    @lru_cache(maxsize=10)
+    # Helper to load a specific vector store when requested by a tool
+    def _load_vector_store(kb_name: str):
+        faiss_index_path = get_faiss_index_path(kb_name)
+        if os.path.exists(faiss_index_path):
+            try:
+                vector_store = FAISS.load_local(
+                    faiss_index_path,
+                    embeddings,
+                    allow_dangerous_deserialization=True
+                )
+                logger.info(f"FAISS index loaded successfully from: {faiss_index_path} for KB '{kb_name}'")
+                return vector_store
+            except Exception as e:
+                logger.error(f"Failed to load FAISS index from {faiss_index_path} for KB '{kb_name}': {e}")
+                return None
+        else:
+            logger.warning(f"FAISS index not found at {faiss_index_path} for KB '{kb_name}'.")
+            return None
+
+    @tool
+    def list_available_knowledge_bases() -> str:
+        """
+        Lists all available knowledge bases by inspecting the `knowledge_bases` directory.
+        Returns a JSON string with a list of {'name': 'KB Name', 'role': 'KB Role'} for each KB.
+        """
+        available_kbs = []
+        kb_dirs = [d for d in os.listdir(BASE_KNOWLEDGE_BASES_DIR) if os.path.isdir(os.path.join(BASE_KNOWLEDGE_BASES_DIR, d))]
+
+        for kb_dir_name in kb_dirs:
+            kb_full_path = os.path.join(BASE_KNOWLEDGE_BASES_DIR, kb_dir_name)
+            metadata_path = os.path.join(kb_full_path, "metadata.json")
+            if os.path.exists(metadata_path):
+                try:
+                    with open(metadata_path, 'r') as f:
+                        metadata = json.load(f)
+                        available_kbs.append({"name": metadata.get("name", kb_dir_name), "role": metadata.get("role", "N/A")})
+                except Exception as e:
+                    logger.warning(f"Could not read metadata for KB '{kb_dir_name}': {e}")
+            else:
+                available_kbs.append({"name": kb_dir_name, "role": "No metadata"})
+
+        logger.info(f"Listed {len(available_kbs)} knowledge bases.")
+        return json.dumps(available_kbs)
+
 
     # Create tools for this agent
     @tool
-    def vector_search(query: str) -> str:
+    def vector_search(input_json: str, k: int = 5) -> str:
         """
-        Search vector database using semantic similarity.
+        Search a specific vector database using semantic similarity.
+        The input must be a JSON string with 'kb_name' and 'query_text' fields.
 
         Finds questions and topics semantically similar to the query.
         Uses embeddings to find related content even with different wording.
 
         Args:
-            query: Search query describing desired topics/questions
+            input_json: JSON string with 'kb_name' (e.g., "ai_&_ml") and 'query_text'
+            k: Number of relevant chunks to retrieve (default: 5)
 
         Returns:
-            Similar questions and topics from knowledge base
+            Similar questions and topics from knowledge base,
+            or an error message if the knowledge base is not available.
         """
         try:
-            # TODO: Implement actual vector search with vector DB
-            # For now, simulate with LLM
-            prompt = FALLBACK_PROMPTS.get("vector_search", "")
-            messages = [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"Find similar questions for: {query}"}
-            ]
+            input_data = json.loads(input_json)
+            kb_name = input_data.get('kb_name')
+            query = input_data.get('query_text')
 
-            if langfuse_handler:
-                config = RunnableConfig(
-                    callbacks=[langfuse_handler],
-                    tags=["vector_search", "kb_search_tool", "deep_agent"],
-                    metadata={"tool_type": "vector_search"}
-                )
-                response = llm.invoke(messages, config=config)
-            else:
-                response = llm.invoke(messages)
+            if not kb_name or not query:
+                return "Error: Both 'kb_name' and 'query_text' must be provided in the input JSON."
 
-            logger.info("Vector search completed")
-            return response.content
+            vector_store = _load_vector_store(kb_name)
+            if vector_store is None:
+                return f"Error: Knowledge base '{kb_name}' not found or could not be loaded."
+
+            # Perform actual vector search
+            docs = vector_store.similarity_search(query, k=k)
+            results = "\n\n".join([doc.page_content for doc in docs])
+            logger.info(f"Vector search completed for query: '{query}' in KB: '{kb_name}'")
+            return results
+        except json.JSONDecodeError:
+            return "Error: Invalid JSON input for vector_search."
         except Exception as e:
-            logger.error(f"Error in vector search: {e}")
-            return f"Error: {str(e)}"
+            logger.error(f"Error in vector search with FAISS for KB '{kb_name}': {e}")
+            return f"Error performing vector search in KB '{kb_name}': {str(e)}"
 
     @tool
-    def keyword_search(keywords: str) -> str:
+    def keyword_search(input_json: str, k: int = 5) -> str:
         """
-        Search knowledge base by exact keywords.
+        Search a specific knowledge base by exact keywords or semantic similarity emphasizing keywords.
+        The input must be a JSON string with 'kb_name' and 'keywords_list' fields.
 
         Finds content matching specific keywords or technologies.
         Use for precise technology names, frameworks, or concepts.
+        Currently leverages vector search for a more robust keyword match.
 
         Args:
-            keywords: Comma-separated keywords to search for
+            input_json: JSON string with 'kb_name' (e.g., "ai_&_ml") and 'keywords_list' (comma-separated string)
+            k: Number of relevant chunks to retrieve (default: 5)
 
         Returns:
-            Matching content from knowledge base
+            Matching content from knowledge base.
         """
         try:
-            prompt = FALLBACK_PROMPTS.get("keyword_search", "")
-            messages = [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"Search for keywords: {keywords}"}
-            ]
+            input_data = json.loads(input_json)
+            kb_name = input_data.get('kb_name')
+            keywords = input_data.get('keywords_list')
 
-            if langfuse_handler:
-                config = RunnableConfig(
-                    callbacks=[langfuse_handler],
-                    tags=["keyword_search", "kb_search_tool", "deep_agent"],
-                    metadata={"tool_type": "keyword_search"}
-                )
-                response = llm.invoke(messages, config=config)
-            else:
-                response = llm.invoke(messages)
+            if not kb_name or not keywords:
+                return "Error: Both 'kb_name' and 'keywords_list' must be provided in the input JSON."
 
-            logger.info("Keyword search completed")
-            return response.content
+            vector_store = _load_vector_store(kb_name)
+            if vector_store is None:
+                return f"Error: Knowledge base '{kb_name}' not found or could not be loaded."
+
+            docs = vector_store.similarity_search(keywords, k=k) # Using vector search for keyword matching
+            results = "\n\n".join([doc.page_content for doc in docs])
+            logger.info(f"Keyword search completed for keywords: '{keywords}' in KB: '{kb_name}'")
+            return results
+        except json.JSONDecodeError:
+            return "Error: Invalid JSON input for keyword_search."
         except Exception as e:
-            logger.error(f"Error in keyword search: {e}")
-            return f"Error: {str(e)}"
+            logger.error(f"Error in keyword search with FAISS for KB '{kb_name}': {e}")
+            return f"Error performing keyword search in KB '{kb_name}': {str(e)}"
 
     @tool
-    def topic_lookup(topic: str) -> str:
+    def topic_lookup(input_json: str, k: int = 5) -> str:
         """
-        Find question templates by topic category.
+        Find question templates or content by topic category using semantic search within a specific knowledge base.
+        The input must be a JSON string with 'kb_name' and 'topic_name' fields.
 
-        Retrieves pre-defined question templates for specific topics.
+        Retrieves pre-defined question templates or content for specific topics.
         Topics include: algorithms, databases, system design, OOP, etc.
 
         Args:
-            topic: Topic category to look up
+            input_json: JSON string with 'kb_name' (e.g., "ai_&_ml") and 'topic_name'
+            k: Number of relevant chunks to retrieve (default: 5)
 
         Returns:
-            Question templates and examples for the topic
+            Question templates and examples for the topic from knowledge base.
         """
         try:
-            prompt = FALLBACK_PROMPTS.get("topic_lookup", "")
-            messages = [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"Find questions for topic: {topic}"}
-            ]
+            input_data = json.loads(input_json)
+            kb_name = input_data.get('kb_name')
+            topic = input_data.get('topic_name')
 
-            if langfuse_handler:
-                config = RunnableConfig(
-                    callbacks=[langfuse_handler],
-                    tags=["topic_lookup", "kb_search_tool", "deep_agent"],
-                    metadata={"tool_type": "topic_lookup"}
-                )
-                response = llm.invoke(messages, config=config)
-            else:
-                response = llm.invoke(messages)
+            if not kb_name or not topic:
+                return "Error: Both 'kb_name' and 'topic_name' must be provided in the input JSON."
 
-            logger.info("Topic lookup completed")
-            return response.content
+            vector_store = _load_vector_store(kb_name)
+            if vector_store is None:
+                return f"Error: Knowledge base '{kb_name}' not found or could not be loaded."
+
+            docs = vector_store.similarity_search(f"Interview questions on {topic}", k=k)
+            results = "\n\n".join([doc.page_content for doc in docs])
+            logger.info(f"Topic lookup completed for topic: '{topic}' in KB: '{kb_name}'")
+            return results
+        except json.JSONDecodeError:
+            return "Error: Invalid JSON input for topic_lookup."
         except Exception as e:
-            logger.error(f"Error in topic lookup: {e}")
-            return f"Error: {str(e)}"
+            logger.error(f"Error in topic lookup with FAISS for KB '{kb_name}': {e}")
+            return f"Error performing topic lookup in KB '{kb_name}': {str(e)}"
 
-    # Create the tools list
-    tools = [vector_search, keyword_search, topic_lookup]
+    # Create the tools list - now includes list_available_knowledge_bases
+    tools = [list_available_knowledge_bases, vector_search, keyword_search, topic_lookup]
 
     # Load system prompt from Langfuse or use fallback
     system_prompt = FALLBACK_PROMPTS["kb_search_agent"]
@@ -562,7 +648,7 @@ def create_kb_search_agent(
         system_prompt=system_prompt
     )
 
-    logger.info(f"KB Search Agent created with {len(tools)} tools")
+    logger.info(f"KB Search Agent created with {len(tools)} tools, with dynamic KB selection capability.")
     return agent
 
 
