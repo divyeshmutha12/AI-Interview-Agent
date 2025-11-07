@@ -43,7 +43,7 @@ class AgentService:
     def __init__(
         self,
         openai_api_key: Optional[str] = None,
-        openai_model: str = "gpt-4o-mini",
+        openai_model: Optional[str] = None,  
         langfuse_public_key: Optional[str] = None,
         langfuse_secret_key: Optional[str] = None,
         langfuse_host: Optional[str] = None,
@@ -68,19 +68,26 @@ class AgentService:
 
         # Setup OpenAI
         self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-        self.openai_model = openai_model or os.getenv("OPENAI_MODEL", "gpt-4o")
+        self.openai_model = openai_model or os.getenv("OPENAI_MODEL")
 
         # Setup Prompt Label (allows per-developer or per-environment configuration)
         self.prompt_label = prompt_label or os.getenv("LANGFUSE_PROMPT_LABEL", "production")
         logger.info(f"Using prompt label: {self.prompt_label}")
 
+        # Validate required configuration
         if not self.openai_api_key:
             raise ValueError("OpenAI API key not provided")
+
+        if not self.openai_model:
+            raise ValueError(
+                "OpenAI model not provided. "
+                "Please set OPENAI_MODEL in .env file or pass openai_model parameter."
+            )
 
         self.llm = ChatOpenAI(
             model=self.openai_model,
             api_key=self.openai_api_key,
-            temperature=0.7
+            temperature=0.3
         )
         logger.info(f"OpenAI LLM initialized with model: {self.openai_model}")
 

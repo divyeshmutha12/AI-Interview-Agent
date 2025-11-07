@@ -90,7 +90,7 @@ def initialize_services():
     """Initialize agent service and document parser (cached)"""
     try:
         agent_service = AgentService()
-        doc_parser = DocumentParser(prefer_pdfplumber=True)
+        doc_parser = DocumentParser()  # Uses PyMuPDF by default
         return agent_service, doc_parser, None
     except Exception as e:
         logger.error(f"Failed to initialize services: {e}")
@@ -169,7 +169,7 @@ def main():
         st.markdown("[View Traces in Langfuse](https://cloud.langfuse.com)")
 
     # Main tabs
-    tab1, tab2, tab3 = st.tabs(["📤 Upload & Generate", "✅ Evaluate Answer", "ℹ️ About"])
+    tab1, tab2 = st.tabs(["📤 Upload & Generate", "✅ Evaluate Answer"])
 
     # ===== TAB 1: Upload & Generate =====
     with tab1:
@@ -346,70 +346,6 @@ def main():
                 except Exception as e:
                     st.error(f"❌ Error evaluating answer: {str(e)}")
                     logger.error(f"Evaluation error: {e}", exc_info=True)
-
-    # ===== TAB 3: About =====
-    with tab3:
-        st.header("About AI Interviewer System")
-
-        st.markdown("""
-        ### 🎯 Features
-
-        - **Intelligent Question Generation**: Analyzes resume and job description to generate relevant questions
-        - **Multi-Agent Architecture**: Uses specialized AI agents for different tasks
-        - **Comprehensive Evaluation**: Evaluates candidate answers with detailed feedback
-        - **Document Support**: Handles PDF, DOCX, and TXT files
-        - **Full Observability**: Complete tracing via Langfuse
-
-        ### 🏗️ Architecture
-
-        ```
-        Supervisor Agent
-        ├── Question & Answer Generator Agent
-        │   ├── Candidate Analysis Tool
-        │   ├── KB Search Tool
-        │   └── Web Search Tool
-        └── Evaluator Agent
-            ├── Topic Extraction
-            ├── Ideal Answer Generation
-            ├── Topic Evaluation
-            └── Cross Validation
-        ```
-
-        ### 🚀 How to Use
-
-        1. **Upload Documents**: Upload candidate's resume and job description
-        2. **Configure**: Set number of questions and optional session ID
-        3. **Generate**: Click "Generate Interview Questions" button
-        4. **Review**: Review generated questions with ideal answers
-        5. **Evaluate**: Use the evaluation tab to score candidate responses
-
-        ### 🔧 Technology Stack
-
-        - **LangChain**: Agent orchestration
-        - **LangGraph**: Workflow management
-        - **OpenAI**: Language models
-        - **Langfuse**: Observability & prompt management
-        - **Streamlit**: Web interface
-        - **PyPDF2/pdfplumber**: PDF parsing
-        - **python-docx**: DOCX parsing
-
-        ### 📚 Documentation
-
-        For more information, check out:
-        - [GitHub Repository](#)
-        - [Langfuse Dashboard](https://cloud.langfuse.com)
-        - [API Documentation](#)
-
-        ### 📝 Notes
-
-        - All uploaded files are temporarily stored and not persisted
-        - Session IDs help group related requests for better tracking
-        - Traces are available in Langfuse for debugging and monitoring
-
-        ---
-
-        Made with ❤️ by Divyesh
-        """)
 
 
 if __name__ == "__main__":
