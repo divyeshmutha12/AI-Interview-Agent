@@ -98,7 +98,7 @@ Supervisor_Agent/
 - **OpenAI** - GPT-4o-mini for LLM
 - **Langfuse** - Observability & prompt management
 - **Streamlit** - Web interface
-- **PyPDF2/pdfplumber** - Document parsing
+- **PyMuPDF** - Fast PDF parsing (with pdfplumber fallback)
 
 ## 📄 Supported File Formats
 
@@ -188,5 +188,5 @@ pip install -r requirements.txt
 ### Document Parsing Issues
 Ensure you have the correct libraries:
 ```bash
-pip install PyPDF2 pdfplumber python-docx
+pip install pymupdf pdfplumber python-docx
 ```
