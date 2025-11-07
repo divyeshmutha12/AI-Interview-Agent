@@ -190,15 +190,3 @@ Ensure you have the correct libraries:
 ```bash
 pip install PyPDF2 pdfplumber python-docx
 ```
-
-## 👥 Team
-
-- **Divyesh** - Lead Developer
-
-## 📝 License
-
-[Add your license here]
-
----
-
-Made with ❤️ using Claude Code
