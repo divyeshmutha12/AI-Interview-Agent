@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from typing import Dict, Any, Optional
 import logging
 import os
+import re
 from dotenv import load_dotenv
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
@@ -209,6 +210,8 @@ class AgentService:
             # Extract tool calls to determine which agent/pipeline was used
             tool_used = None
             pipeline_name = None
+            candidate_analysis_output = None
+
             for message in result.get("messages", []):
                 if hasattr(message, 'tool_calls') and message.tool_calls:
                     tool_used = message.tool_calls[0]['name']
@@ -218,12 +221,40 @@ class AgentService:
                         pipeline_name = "Answer Evaluation"
                     break
 
+            # Extract and parse Candidate Analysis from TOOL MESSAGES (not final message)
+            # The candidate analysis is embedded with special markers by the tool
+            # We need to look in ToolMessage types, not the supervisor's final response
+            ca_pattern = r'<!--CANDIDATE_ANALYSIS_START-->\n(.*?)\n<!--CANDIDATE_ANALYSIS_END-->'
+
+            for message in result.get("messages", []):
+                # Check if this is a ToolMessage (has 'type' attribute or 'name' attribute)
+                is_tool_message = (
+                    hasattr(message, 'type') and message.type == 'tool'
+                ) or (
+                    hasattr(message, 'name') and message.name in ['generate_questions_and_answers', 'evaluate_answer']
+                ) or (
+                    message.__class__.__name__ == 'ToolMessage'
+                )
+
+                if is_tool_message and hasattr(message, 'content') and message.content:
+                    content_str = str(message.content)
+                    ca_match = re.search(ca_pattern, content_str, re.DOTALL)
+
+                    if ca_match:
+                        candidate_analysis_output = ca_match.group(1).strip()
+                        logger.info(f"Candidate analysis extracted successfully from tool message ({len(candidate_analysis_output)} chars)")
+                        break
+
+            if not candidate_analysis_output:
+                logger.warning("No candidate analysis found in tool messages")
+
             # Prepare output
             final_output = {
                 "user_input": user_input,
                 "result": final_result,
                 "tool_used": tool_used,
                 "pipeline": pipeline_name,
+                "candidate_analysis": candidate_analysis_output,  # Add CA output
                 "metadata": {
                     "user_id": user_id,
                     "session_id": session_id,

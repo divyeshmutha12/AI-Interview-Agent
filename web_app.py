@@ -135,16 +135,10 @@ def main():
         st.stop()
 
     # Sidebar
+    session_id = None  # Session tracking disabled
+
     with st.sidebar:
         st.header("⚙️ Configuration")
-
-        # Session ID
-        session_id = st.text_input(
-            "Session ID (optional)",
-            value="",
-            placeholder="e.g., interview_001",
-            help="Use a session ID to group related requests in Langfuse"
-        )
 
         # Number of questions
         num_questions = st.slider(
@@ -245,7 +239,7 @@ def main():
                             candidate_resume=resume_text,
                             job_profile=jd_text,
                             num_questions=num_questions,
-                            session_id=session_id if session_id else None
+                            session_id=None
                         )
 
                     # Display results
@@ -258,11 +252,23 @@ def main():
                         with st.expander("ℹ️ Generation Details"):
                             col1, col2, col3 = st.columns(3)
                             with col1:
-                                st.metric("Pipeline", result.get('pipeline', 'N/A'))
+                                st.markdown("**Pipeline:**")
+                                st.text(result.get('pipeline', 'N/A'))
                             with col2:
-                                st.metric("Tool Used", result.get('tool_used', 'N/A'))
+                                st.markdown("**Tool Used:**")
+                                st.text(result.get('tool_used', 'N/A'))
                             with col3:
-                                st.metric("Model", result['metadata']['model'])
+                                st.markdown("**Model:**")
+                                st.text(result['metadata']['model'])
+
+                        # Candidate Analysis (Explainable AI)
+                        if result.get('candidate_analysis'):
+                            with st.expander("🔍 Candidate Analysis (How Agent Analyzed the Resume against JD)", expanded=False):
+                                st.markdown("""
+                                **This shows how the AI analyzed the candidate's resume to generate personalized questions.**
+                                """)
+                                st.code(result['candidate_analysis'], language='text')
+                                st.caption("💡 This analysis helps ensure questions are tailored to the candidate's actual experience")
 
                         # Questions
                         st.markdown("---")
@@ -319,7 +325,7 @@ def main():
                     with st.spinner("🤖 AI agents are evaluating the answer..."):
                         result = agent_service.run(
                             user_input=eval_request,
-                            session_id=session_id if session_id else None
+                            session_id=None
                         )
 
                     # Display results
@@ -332,11 +338,14 @@ def main():
                         with st.expander("ℹ️ Evaluation Details"):
                             col1, col2, col3 = st.columns(3)
                             with col1:
-                                st.metric("Pipeline", result.get('pipeline', 'N/A'))
+                                st.markdown("**Pipeline:**")
+                                st.text(result.get('pipeline', 'N/A'))
                             with col2:
-                                st.metric("Tool Used", result.get('tool_used', 'N/A'))
+                                st.markdown("**Tool Used:**")
+                                st.text(result.get('tool_used', 'N/A'))
                             with col3:
-                                st.metric("Model", result['metadata']['model'])
+                                st.markdown("**Model:**")
+                                st.text(result['metadata']['model'])
 
                         # Evaluation results
                         st.markdown("---")
