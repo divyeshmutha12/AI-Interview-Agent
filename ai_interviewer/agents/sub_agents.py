@@ -1,30 +1,26 @@
 """
 Sub-Agents for AI Interviewer System (Proper Multi-Agent Architecture)
 
-This module implements a true multi-agent hierarchy:
-1. Supervisor Agent
-   └── Question & Answer Generator Agent (LangChain Agent)
-       ├── Candidate Analysis Agent (LangChain Agent with tools)
-       ├── KB Search Agent (Deep Agent with tools)
-       └── Web Search Agent (Deep Agent with tools)
-   └── Evaluator Pipeline
-
-All agents use LangChain's create_agent() pattern.
+This module implements a true multi-agent hierarchy with WORKING KB search tools.
 """
-import os
-from langchain_openai import ChatOpenAI , OpenAIEmbeddings
+
+from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
-from langchain_community.vectorstores import FAISS
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing import Dict, Any, Optional, List, Callable
 import logging
-from docx import Document
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
 import json
+import os
+from pathlib import Path
+
+# Import hybrid retriever for KB search functionality
+import sys
+kb_path = Path(__file__).parent.parent / "kb"
+sys.path.insert(0, str(kb_path))
+from ai_interviewer.kb.hybrid_retriever import hybrid_retrieve, load_kb, IN_MEMORY_KB, keyword_search_only, vector_search_only
 
 logger = logging.getLogger(__name__)
 
@@ -48,67 +44,568 @@ Your job:
 2. THEN call parse_job_description with the job profile
 3. FINALLY call compare_profiles to analyze fit
 
-Output a structured analysis with:
-- Experience level (junior/mid/senior/lead)
-- Skill match percentage
-- Recommended question difficulty
-- Focus areas for interview
+CRITICAL: Output MUST be in STRUCTURED format for easy parsing by the Question Generator.
+**YOUR OUTPUT MUST ALSO INCLUDE SPECIFIC QUESTION PATTERNS** to help the Question Generator create personalized (not generic) questions.
+
+## Output Format (MANDATORY):
+
+```
+=== CANDIDATE PROFILE ===
+Name: [Full name]
+Experience: [X] years ([Junior/Mid/Senior/Lead] level)
+Education: [Degree, Institution, Year]
+
+=== WORK HISTORY ===
+1. [Company Name] ([Start Date] - [End Date/Present])
+   Role: [Job Title]
+   Key Responsibilities: [Brief summary]
+
+2. [Next Company]...
+
+=== PROJECTS ===
+1. [Project Name] ([Date Range])
+   Achievement: [Specific measurable results with metrics/numbers]
+   Scale/Impact: [Volume, users, performance improvements]
+   Technologies: [Comma-separated list of technologies used]
+   Company: [If applicable]
+
+2. [Next Project]...
+
+=== SKILLS ASSESSMENT ===
+
+**CRITICAL: Before marking ANY skill as MISSING, RE-READ THE PROJECTS SECTION ABOVE!**
+
+**MANDATORY CROSS-CHECK:**
+1. Look at the "Technologies:" line in EACH project listed above
+2. If ANY project lists the technology, the candidate HAS that skill
+3. Example: If you see "Technologies: Python, FastAPI, Git" → Git is NOT MISSING, mark it as ✅
+4. Example: If you see "GPT-4" or "RAG" in any project → GenAI/LLM is NOT MISSING, mark it as ✅
+
+**Before marking "MISSING", verify:**
+- [ ] I checked EVERY project's "Technologies:" line above
+- [ ] The skill is NOT in ANY project technology list
+- [ ] The project work does NOT imply the skill
+
+**EXAMPLE OF CORRECT CROSS-CHECKING:**
+If PROJECTS section shows:
+  "Technologies: Python, FastAPI, Git, Azure OpenAI"
+
+Then SKILLS ASSESSMENT should show:
+  ✅ Git: Present - Evidence: Listed in Auto Code Resolution project technologies
+  ✅ GenAI/LLM: Advanced - Evidence: Azure OpenAI in Auto Code Resolution project
+  ✅ FastAPI: Advanced - Evidence: Used in Auto Code Resolution project
+
+NOT:
+  ❌ Git: MISSING
+  ❌ GenAI/LLM: MISSING
+
+MUST-HAVE SKILLS (from job requirements):
+✅ [Skill 1]: [Present/Advanced/Intermediate/Basic] - Evidence: [Where found in resume OR which project technology proves it]
+✅ [Skill 2]: [Present/Advanced/Intermediate/Basic] - Evidence: [Where found in resume OR which project technology proves it]
+❌ [Skill 3]: MISSING - [Explanation - ONLY if truly absent from BOTH skills section AND project technologies]
+⚠️ [Skill 4]: PARTIAL - [What they have vs what's needed]
+
+NICE-TO-HAVE SKILLS:
+✅ [Skill]: [Level] - Evidence: [Where found OR which technology proves it]
+❌ [Skill]: MISSING - [ONLY if not in skills section AND not in any project technologies]
+
+TECHNOLOGIES BY CATEGORY:
+- Languages: [List]
+- Frameworks: [List]
+- Cloud/Infrastructure: [List]
+- Tools: [List]
+- Databases: [List]
+
+=== ACHIEVEMENTS & RECOGNITION ===
+- [Award/Recognition] ([Year/Organization])
+- [Achievement with metrics]
+- [Certification] ([Issuing Organization])
+
+=== SKILL MATCH ANALYSIS ===
+Overall Match: [X]%
+
+JUSTIFICATION:
+- Must-have skills present: [X] out of [Y] ([Z]%)
+- Nice-to-have skills present: [X] out of [Y] ([Z]%)
+- Years of experience: [Meets/Below/Exceeds] requirement
+- Domain relevance: [High/Medium/Low]
+
+TOP STRENGTHS TO VERIFY:
+1. [Specific strength] | Evidence: [Project/Company/Metric from resume] | Question Pattern: "At [Company], in YOUR [Project Name], you [specific achievement with metric]. What was YOUR approach to [specific technical aspect]?"
+
+2. [Next strength] | Evidence: [Specific context] | Question Pattern: [Personalized pattern with placeholders]
+
+EXAMPLE (for reference):
+- Proactive monitoring excellence | Evidence: Reduced pod downtime by 40% at TCS India Cloud project using Prometheus/Grafana | Question Pattern: "At TCS on the India Cloud project, YOU reduced pod downtime by 40%. What specific Prometheus alerting rules did YOU configure to achieve this?"
+
+CRITICAL GAPS TO ADDRESS:
+1. [Specific gap] | Severity: [CRITICAL/IMPORTANT/MINOR] | Impact: [How this affects role fit] | Question Pattern: "You have [their actual experience] but the role requires [missing skill/experience]. How would YOU approach [specific scenario requiring the missing skill]?"
+
+2. [Next gap] | Severity: [Level] | Impact: [Explanation] | Question Pattern: [Situational question pattern]
+
+EXAMPLE (for reference):
+- VMware migration experience | Severity: CRITICAL | Impact: Role requires VMware-to-bare-metal migration expertise, candidate has zero VMware experience | Question Pattern: "This role requires migrating OpenShift from VMware to bare-metal infrastructure. You haven't done this before - how would YOU plan and execute such a migration?"
+
+=== INTERVIEW RECOMMENDATIONS ===
+
+DIFFICULTY LEVEL: [Easy/Medium/Medium-High/High]
+Rationale: [Why this difficulty is appropriate]
+
+FOCUS AREAS (Priority Order):
+1. [Area]: [Why it's important, what to probe]
+2. [Area]: [Why it's important, what to probe]
+3. [Area]: [Why it's important, what to probe]
+
+SUGGESTED QUESTION TYPES:
+- [X]% Project-specific questions (about their actual projects)
+- [Y]% Technical depth questions (about technologies they've used)
+- [Z]% Behavioral questions (about their career progression)
+
+KEY PROJECTS TO PROBE:
+1. [Project Name] at [Company]:
+   - Context: [Specific achievement/metric/scale from resume]
+   - Question Pattern: "At [Company], in YOUR [Project Name], you [specific achievement with metric]. [Specific technical question about how they did it]?"
+   - Assessment Goal: [What this question will reveal about their capabilities]
+
+2. [Next Project] at [Company]:
+   - Context: [Specific details]
+   - Question Pattern: [Pattern with placeholders]
+   - Assessment Goal: [What to assess]
+
+=== QUESTION GENERATION GUIDANCE ===
+
+**GOOD PERSONALIZED QUESTION PATTERNS (Use these as templates):**
+
+✅ "At [Company], in YOUR [Project Name], you [specific achievement with metric]. What [specific technique/approach] did YOU use to [specific aspect]?"
+
+✅ "You mentioned [specific technology/tool] in YOUR [Project Name] at [Company]. How did YOU [specific implementation detail]?"
+
+✅ "In YOUR role at [Company], you [specific responsibility]. Can you walk me through YOUR approach to [specific scenario]?"
+
+✅ "You achieved [specific metric/result] at [Company]. What challenges did YOU face and how did YOU overcome them?"
+
+**BAD GENERIC QUESTIONS (AVOID these patterns):**
+
+❌ "What are the differences between [Technology A] and [Technology B]?" (No reference to candidate's work)
+❌ "How do you handle [general scenario]?" (No reference to their actual projects)
+❌ "What is [concept]?" (Textbook definition question)
+❌ "Can you explain [technology]?" (No personalization)
+
+**PERSONALIZATION REQUIREMENTS:**
+Every question MUST include at least ONE of:
+- Specific company name from resume
+- Specific project name from resume
+- Specific achievement/metric from resume
+- Specific technology they actually used (mapped to project)
+
+If you cannot create a personalized question using the above, DO NOT include it in recommendations.
+```
+
+## IMPORTANT RULES:
+
+1. **Extract ALL project names** - Don't summarize, list each project explicitly
+2. **Extract ALL company names** - Full employment history
+3. **Extract ALL metrics and numbers** - Percentages, volumes, time saved, etc.
+4. **Extract ALL technologies** - Map technologies to projects where used
+5. **Extract ALL awards and certifications** - Don't skip recognition
+6. **Accurate skill matching** - Read the resume carefully, don't say "missing" if it's there
+7. **Be specific with evidence** - Point to where you found each skill
+8. **Use exact names** - Project names, company names, technology names as written
+9. **PROVIDE QUESTION PATTERNS** - For each strength, gap, and project, include a specific question pattern with [placeholders]
+10. **SHOW GOOD vs BAD EXAMPLES** - Include examples in the Question Generation Guidance section
+11. **TECHNOLOGY IMPLIES SKILL** - If resume mentions "GPT-4", "Azure OpenAI", "Claude", that IS evidence of LLM/GenAI experience. If it mentions "Git", "GitHub", "GitLab", that IS version control experience. Map technologies to their skill categories.
+12. **READ PROJECT TECHNOLOGIES CAREFULLY** - Technologies listed in projects count as evidence. If "Git" is in a project's tech stack, the candidate HAS Git experience.
+13. **INFER SKILL FROM CONTEXT** - If someone built an "LLM application" or "RAG pipeline", they HAVE LLM/GenAI experience even if not explicitly stated in skills section
+14. **USE EXACT METRICS IN QUESTION PATTERNS** - Don't say "significantly" - use actual numbers like "<8 seconds", "36,000 docs/day", "98% accuracy"
+
+## COMMON MISTAKES TO AVOID:
+
+❌ Saying skills are "not mentioned" when they ARE in the resume
+❌ Generic summaries instead of specific project names
+❌ Missing measurable achievements (percentages, volumes, time metrics)
+❌ Underestimating skill match percentage due to poor parsing
+❌ Narrative format instead of structured format
+❌ Missing awards, certifications, or recognition
+❌ **NOT providing question patterns for the Question Generator**
+❌ **Providing generic question angles instead of personalized ones**
+❌ **Missing the connection between projects and technologies**
+❌ **CRITICAL ERROR: Marking "GenAI/LLM experience" as MISSING when projects use GPT-4, Azure OpenAI, Claude, or RAG**
+❌ **CRITICAL ERROR: Marking "Git experience" as MISSING when Git/GitHub/GitLab is in project technologies**
+❌ **CRITICAL ERROR: Saying "not explicitly mentioned" when the technology IS mentioned in projects**
+❌ **Using vague terms like "significantly" instead of exact metrics in question patterns**
+❌ **Not inferring skills from project descriptions** (e.g., "built RAG pipeline" = RAG experience)
+
+**REMINDER: If a candidate used GPT-4, Azure OpenAI, Claude, or RAG in ANY project, they HAVE GenAI/LLM experience!**
+
+## VERIFICATION CHECKLIST:
+
+Before outputting, verify:
+- [ ] Did I list EVERY project by name?
+- [ ] Did I list EVERY company with dates?
+- [ ] Did I extract ALL metrics and numbers?
+- [ ] Did I map technologies to specific projects?
+- [ ] Did I include awards and certifications?
+- [ ] Is the skill match percentage justified and accurate?
+- [ ] Is the output in STRUCTURED format (not narrative)?
+- [ ] **Did I provide SPECIFIC question patterns for top strengths?**
+- [ ] **Did I provide SPECIFIC question patterns for critical gaps?**
+- [ ] **Did I provide question patterns for KEY projects with context and assessment goals?**
+- [ ] **Did I include the QUESTION GENERATION GUIDANCE section with GOOD vs BAD examples?**
+- [ ] **Do ALL question patterns include [Company], [Project], or [Metric] placeholders?**
+- [ ] **Did I check if technologies in projects imply required skills?** (GPT-4 in projects = GenAI experience)
+- [ ] **Did I use EXACT metrics in question patterns, not vague terms?**
+- [ ] **Did I infer skills from project context?** (Built "LLM app" = LLM experience)
 """,
-    "parse_resume": """Extract structured information from candidate resume.
-Return JSON with: skills, experience_years, education, domain, certifications.""",
+    "parse_resume": """
+Extract structured information from candidate resume.
+
+# CRITICAL REQUIREMENT: You MUST extract ALL project details with their technologies!
+
+Return JSON with the following structure:
+
+{
+  "skills": ["list of skills from skills section"],
+  "experience_years": number,
+  "education": "degree and institution",
+  "domain": "area of expertise",
+  "certifications": ["list of certifications"],
+
+  "all_technologies": {
+    // ⚠️ COMPREHENSIVE list from ALL sources (skills section + projects + work experience)
+    "languages": ["Python", "SQL"],
+    "frameworks": ["FastAPI", "LangChain", "Streamlit"],
+    "cloud_platforms": ["Azure OpenAI", "Azure DevOps"],
+    "tools": ["Git", "Dataiku", "FAISS"],
+    "databases": ["PostgreSQL", "MySQL"]
+  },
+
+  "projects": [
+    {
+      "name": "Project Name",
+      "company": "Company Name",  // Infer from timeline if not explicit
+      "duration": "Start - End",
+      "technologies": ["Tech1", "Tech2", "Tech3"],  // ⚠️ CRITICAL: Extract ALL from this project
+      "description": "Brief description",
+      "achievements": ["Achievement 1 with metrics", "Achievement 2"]
+    }
+  ],
+
+  "work_experience": [
+    {
+      "company": "Company Name",
+      "role": "Job Title",
+      "duration": "Start - End",
+      "technologies_used": ["Tech1", "Tech2"]  // Extract from job description
+    }
+  ]
+}
+
+# IMPORTANT EXTRACTION RULES:
+
+1. **Projects Section**:
+   - Extract EVERY project listed
+   - For each project, find the "Technologies:", "Tech Stack:", "Tools:", or "Environment:" line
+   - Include ALL technologies listed (don't skip any)
+   - Example: If you see "Technologies: Python, Git, FastAPI, Azure DevOps" → Include all 4
+
+2. **Technologies Extraction** (Extract from ALL sources):
+   - **Source A: Skills Section** - Look for "SKILLS", "TECHNOLOGIES", "TECH STACK" headings
+     * Extract ALL listed technologies with proficiency levels if mentioned
+     * Examples: "Python • Advanced", "SQL • Advanced", "FastAPI • Intermediate"
+   - **Source B: Project Technologies** - Find "Technologies:", "Tech Stack:", "Tools:", "Environment:" lines
+     * Extract ALL technologies from each project
+   - **Source C: Work Experience** - Technologies mentioned in job descriptions
+     * Look for "Skills:" lines in work history
+   - **Merge All Sources**: Combine technologies from A, B, C into comprehensive list
+   - Include tools, frameworks, languages, platforms, databases, cloud services
+   - Don't filter or reduce - include EVERYTHING mentioned across ALL sections
+
+3. **Achievements**:
+   - Extract specific metrics and numbers
+   - Examples: "Reduced latency to <8 seconds", "Achieved >98% accuracy", "Processed 36,000 docs/day"
+
+4. **Company Inference for Projects**:
+   - If a project doesn't explicitly state the company name
+   - Check if project dates fall within a work experience period
+   - Infer company from work history timeline
+   - Example:
+     * Work: "COFORGE (Oct 2023 - Present)"
+     * Project: "Insurance Tracking AI (Aug 2024 - Present)"
+     * Inference: Project company = COFORGE (because Aug 2024 falls after Oct 2023)
+   - If dates overlap multiple companies, use the company where dates align best
+   - If no overlap, leave as "Company not specified"
+
+# CORRECT EXAMPLE:
+
+If resume says:
+```
+SKILLS:
+Python • Advanced
+FastAPI • Intermediate
+Streamlit • Advanced
+
+WORK EXPERIENCE:
+COFORGE - Senior Developer AI (Oct 2023 - Present)
+Skills: Azure OpenAI, NLP
+
+PROJECTS:
+Auto Code Resolution (April 2024 – July 2024)
+Environment: Python, FastAPI, Git, Azure DevOps, Azure OpenAI
+Achievement: Automated security vulnerability fixes
+```
+
+You should extract:
+```json
+{
+  "all_technologies": {  // ← Merged from skills + projects + work exp
+    "languages": ["Python"],
+    "frameworks": ["FastAPI", "Streamlit"],
+    "cloud_platforms": ["Azure OpenAI", "Azure DevOps"],
+    "tools": ["Git"],
+    "ml_technologies": ["NLP"]
+  },
+  "work_experience": [{
+    "company": "COFORGE",
+    "role": "Senior Developer AI",
+    "duration": "Oct 2023 - Present",
+    "technologies_used": ["Azure OpenAI", "NLP"]
+  }],
+  "projects": [{
+    "name": "Auto Code Resolution",
+    "company": "COFORGE",  // ← Inferred from timeline (Apr 2024 is after Oct 2023)
+    "duration": "April 2024 - July 2024",
+    "technologies": ["Python", "FastAPI", "Git", "Azure DevOps", "Azure OpenAI"],
+    "achievements": ["Automated security vulnerability fixes"]
+  }]
+}
+```
+
+# INCORRECT EXAMPLE (DON'T DO THIS):
+
+❌ Extracting only: `"technologies": ["Python", "FastAPI"]` when the list also included Git, Azure DevOps
+❌ Skipping the technologies section entirely
+❌ Only including "main" technologies and filtering out "minor" ones
+❌ Leaving `"company": "Not specified"` when project dates clearly fall within a work period
+❌ Only extracting technologies from projects, ignoring the SKILLS section (missing Streamlit, Pandas, etc.)
+❌ Not merging technologies from all sources into comprehensive `all_technologies` object
+
+Return complete, accurate JSON. Don't summarize or filter.""",
 
     "parse_job_description": """Extract structured information from job description.
 Return JSON with: required_skills, preferred_skills, experience_required, responsibilities, technologies.""",
 
-    "compare_profiles": """Compare candidate resume data with job requirements.
-Analyze skill gaps, experience match, and provide interview focus areas.""",
+    "compare_profiles": """
+You are comparing candidate qualifications against job requirements.
+
+# INPUT DATA YOU RECEIVE:
+
+1. **Resume Data** - Structured information extracted from candidate's resume including:
+   - Skills section
+   - Projects with technologies used
+   - Work experience
+   - Education
+
+2. **Job Requirements** - Structured job requirements including:
+   - Must-have skills
+   - Nice-to-have skills
+   - Experience requirements
+
+# YOUR CRITICAL TASK:
+
+Perform a THOROUGH, ACCURATE comparison and provide:
+1. Skill match percentage with detailed justification
+2. Skill-by-skill assessment with EVIDENCE
+3. Interview focus areas and recommended questions
+
+# MANDATORY CROSS-CHECK RULES:
+
+**BEFORE marking ANY skill as MISSING, you MUST:**
+
+1. ✅ **CHECK PROJECT TECHNOLOGIES FIRST**
+   - Look at EVERY project's "Technologies" or "Tech Stack" section
+   - If a technology/tool appears in ANY project → The candidate HAS that skill
+   - Example: If you see "Technologies: Python, Git, FastAPI" → Git is NOT MISSING
+
+2. ✅ **MAP TECHNOLOGIES TO SKILLS**
+   - "GPT-4", "Azure OpenAI", "Claude", "LLM" → GenAI/LLM skill ✅
+   - "Git", "GitHub", "GitLab", "version control" → Git/Version Control ✅
+   - "RAG", "Retrieval Augmented Generation" → RAG skill AND Context Engineering ✅
+   - "Prompt Engineering", "Prompt Versioning" → Context Engineering ✅
+   - "PostgreSQL", "MySQL", "SQL" → Database skill ✅
+   - Don't be pedantic - if they used the technology, they have the skill
+
+3. ✅ **INFER FROM PROJECT WORK**
+   - Built "LLM application" → Has LLM experience
+   - "Automated deployment pipeline" → Has CI/CD experience
+   - "Migrated from X to Y" → Has migration experience
+
+4. ✅ **EVIDENCE IS MANDATORY**
+   - Every assessment MUST cite WHERE you found the evidence
+   - Format: "Evidence: [Technology] used in [Project Name] at [Company]"
+   - If you can't find evidence, only then mark as MISSING
+
+# SKILL ASSESSMENT FORMAT:
+
+For EACH required skill, use this format:
+
+**Must-Have Skills:**
+✅ [Skill]: [Level] - Evidence: [Specific citation from resume]
+⚠️ [Skill]: PARTIAL - Evidence: [What they have] | Gap: [What's missing]
+❌ [Skill]: MISSING - Verified: Checked all projects, not found
+
+**CORRECT EXAMPLES:**
+
+✅ Git: Present - Evidence: Listed in "Auto Code Resolution" project technologies at COFORGE
+✅ GenAI/LLM: Advanced - Evidence: Used GPT-4o and Azure OpenAI in "Insurance Tracking AI" project
+✅ RAG: Advanced - Evidence: Explicitly listed in "Insurance Tracking AI" project tech stack
+✅ Context Engineering: Advanced - Evidence: RAG implementation and Prompt versioning in projects
+⚠️ PostgreSQL: PARTIAL - Evidence: Has SQL experience (Hive, Impala), but not PostgreSQL specifically
+❌ Kubernetes: MISSING - Verified: Checked all projects and skills section, not mentioned
+
+**INCORRECT EXAMPLES (NEVER DO THIS):**
+
+❌ Git: MISSING - Not mentioned in skills section
+   → WRONG! Must check projects first
+
+❌ GenAI/LLM: PARTIAL - Used GPT-4o but lacks explicit LLM training
+   → WRONG! Using GPT-4o in production IS LLM experience
+
+❌ RAG: MISSING - Not explicitly mentioned
+   → WRONG! If "RAG" appears anywhere in projects, it IS mentioned
+
+❌ Context Engineering: PARTIAL - Has RAG but not explicit Context Engineering
+   → WRONG! RAG implementation IS Context Engineering experience
+
+# VERIFICATION CHECKLIST:
+
+Before finalizing your assessment, verify:
+
+- [ ] I checked EVERY project's technology list for each required skill
+- [ ] I mapped technology names to skill categories (GPT-4 = LLM skill)
+- [ ] I provided specific evidence citations for each assessment
+- [ ] I didn't mark anything MISSING without checking all projects
+- [ ] I inferred skills from project work (building LLM app = LLM skill)
+- [ ] My skill match percentage accurately reflects actual matches
+
+# COMMON MISTAKES TO AVOID:
+
+❌ **CRITICAL ERROR: Marking "Git" as MISSING when it's in project technologies**
+❌ **CRITICAL ERROR: Marking "GenAI/LLM" as MISSING when candidate used GPT-4, Claude, or Azure OpenAI**
+❌ **CRITICAL ERROR: Marking "RAG" as MISSING when it's explicitly in tech stack**
+❌ **CRITICAL ERROR: Marking "Context Engineering" as PARTIAL/MISSING when candidate has RAG or Prompt Engineering experience**
+❌ **CRITICAL ERROR: Only checking skills section and ignoring projects**
+❌ **CRITICAL ERROR: Being too literal - "They said FastAPI not Flask" (both are Python frameworks)**
+❌ **CRITICAL ERROR: Saying "not explicitly mentioned" when it IS mentioned in projects**
+
+# SKILL LEVEL DEFINITIONS:
+
+- **Advanced**: Used extensively across multiple projects with measurable results
+- **Intermediate**: Used in 1-2 projects with some depth
+- **Basic**: Mentioned or used minimally
+- **PARTIAL**: Has related experience but not exact match
+- **MISSING**: Verified absent after checking ALL projects and skills
+
+# OUTPUT STRUCTURE:
+
+Provide your analysis in this exact format:
+
+```
+=== SKILL MATCH ANALYSIS ===
+Overall Match: [X]%
+
+JUSTIFICATION:
+- Must-have skills present: X out of Y ([percentage]%)
+- Nice-to-have skills present: X out of Z ([percentage]%)
+- Years of experience: [Meets/Below/Exceeds] requirement
+- Domain relevance: [High/Medium/Low]
+
+**MUST-HAVE SKILLS:**
+
+✅ [Skill]: [Level] - Evidence: [Citation]
+✅ [Skill]: [Level] - Evidence: [Citation]
+⚠️ [Skill]: PARTIAL - Evidence: [What they have] | Gap: [What's missing]
+❌ [Skill]: MISSING - Verified: Checked all projects, not found
+
+**NICE-TO-HAVE SKILLS:**
+
+[Same format as above]
+
+=== INTERVIEW FOCUS AREAS ===
+
+1. [Focus Area]: [Why this matters]
+   - Question to ask: "[Specific question based on their experience]"
+
+2. [Focus Area]: [Why this matters]
+   - Question to ask: "[Specific question based on their experience]"
+
+=== RECOMMENDED DIFFICULTY LEVEL ===
+
+[Junior/Mid/Senior] - Rationale: [Explain based on skill match and experience]
+```
+
+# FINAL REMINDER:
+
+Your job is to be ACCURATE, not harsh. If someone used a technology in their projects, they HAVE that skill. Don't underestimate candidates by ignoring their project work.
+
+Cross-check EVERYTHING before marking as MISSING.""",
 
     # KB Search Agent and its tools
-     "kb_search_agent": """
-You are a highly intelligent and specialized Knowledge Base Search Agent for an AI Interviewer system. Your mission is to retrieve the most relevant, diverse, and comprehensive information from available knowledge bases to assist in generating precise interview questions for *any* job role.
+    "kb_search_agent": """
+You are a Knowledge Base Search Agent with REAL working search tools.
 
-You have access to the following powerful tools, each designed for a specific type of information retrieval:
+You have access to 3 PROPERLY WORKING search tools:
+1. vector_search - Semantic similarity search using FAISS (best for conceptual questions)
+2. keyword_search - Exact keyword matching using BM25 (best for specific technologies)
 
-1.  **list_available_knowledge_bases()**:
-    *   **Purpose**: Discover which knowledge bases are currently available. You **MUST** call this tool first to understand your searchable domains.
-    *   **Returns**: A JSON string listing available KBs and their general roles (e.g., `[{"name": "Openshift ", "role": "Cloud Platform"}, {"name": "AI&ML", "role": "Artificial Intelligence & Machine Learning"}]`).
-    *   **How to Use**: `list_available_knowledge_bases()`
+YOUR TOOLS ARE NOW WORKING WITH REAL FAISS + BM25 RETRIEVAL!
 
-2.  **vector_search(input_json: str)**:
-    *   **Purpose**: Ideal for **semantic search** and exploring broad concepts, definitions, high-level principles, or when the exact phrasing isn't known. Use this when you need content that is *conceptually similar* to your query, even if the keywords don't precisely match. Excellent for understanding "what is X" or "how does Y work" at a deeper level.
-    *   **Input**: A JSON string with two fields:
-        *   `kb_name` (string): The name of the knowledge base to search (e.g., "Openshift ", "AI&ML").
-        *   `query_text` (string): The conceptual question or topic you want to find semantically similar information for.
-    *   **How to Use**: `vector_search('{"kb_name": "Openshift ", "query_text": "Explain Kubernetes pod scheduling."}')`
+## Decision Framework:
 
-3.  **keyword_search(input_json: str)**:
-    *   **Purpose**: Best for finding content related to **specific named entities, technologies, versions, frameworks, commands, or exact terms**. This tool is optimized to surface documents containing or closely related to the *precise keywords* you provide. Use this when you have very specific terms you want to match, like "OpenShift CLI commands", "Kubernetes networking policies", or "Python troubleshooting".
-    *   **Input**: A JSON string with two fields:
-        *   `kb_name` (string): The name of the knowledge base to search.
-        *   `keywords_list` (string): A comma-separated string of exact keywords or technical terms you are looking for.
-    *   **How to Use**: `keyword_search('{"kb_name": "Openshift ", "keywords_list": "oc debug, StatefulSets, Ingress Controller"}' )`
+### USE VECTOR_SEARCH WHEN:
+- Candidate is Senior/Lead level
+- Questions are conceptual/architectural
+- Need broad understanding of topics
+- Dealing with system design, best practices
+- Example: "system design questions", "software architecture patterns"
 
-4.  **topic_lookup(input_json: str)**:
-    *   **Purpose**: Designed to retrieve **structured question templates, common interview topics, or pre-curated content blocks** associated with recognized subject areas. Use this when you can clearly identify a well-defined subject category (e.g., "Containerization", "Networking fundamentals", "Troubleshooting scenarios", "System Design patterns").
-    *   **Input**: A JSON string with two fields:
-        *   `kb_name` (string): The name of the knowledge base to search.
-        *   `topic_name` (string): The name of the topic category you are interested in.
-    *   **How to Use**: `topic_lookup('{"kb_name": "Openshift ", "topic_name": "OpenShift Installation & Configuration"}' )`
+### USE KEYWORD_SEARCH WHEN:
+- Candidate is Junior/Mid level
+- Questions are about specific technologies
+- Need precise technical details
+- Targeting specific skill gaps
+- Example: "Python list methods", "FastAPI routing", "Docker commands"
 
-Your Job Workflow for any search request from the Question & Answer Generator Agent:
+### USE HYBRID_SEARCH WHEN:
+- Mixed requirements (conceptual + specific)
+- Comprehensive coverage needed
+- Candidate has mixed experience level
+- Example: "REST API best practices and status codes"
 
-1.  **Understand the Request**: Carefully analyze the incoming request (e.g., candidate's skills, job requirements, desired focus areas).
-2.  **Identify Relevant Knowledge Base(s)**: First, call `list_available_knowledge_bases()` to see your options. Based on the job role and candidate profile, select the most appropriate KB (e.g., "Openshift " for an OpenShift role).
-3.  **Strategic Multi-Tool Application**: Plan your search by considering what type of information each tool is best suited for. You **MUST strive to use a combination of these tools** to get a comprehensive understanding:
-    *   **Start with `topic_lookup`**: If the request clearly points to specific subject areas (e.g., "networking", "security", "troubleshooting"), use `topic_lookup` to get foundational questions or templates.
-    *   **Then use `keyword_search`**: For explicit technologies, commands, or specific features mentioned in the resume or job description (e.g., "Prometheus", "Helm charts", "oc rsh", "Python", "GPT-3"), use `keyword_search`.
-    *   **Complement with `vector_search`**: For broader conceptual understanding, definitions, architectural principles, or related ideas that might not be exact keywords or topics (e.g., "scalability patterns in OpenShift", "ethical considerations in AI", "best practices for cloud migration"), use `vector_search`.
-    *   **Iterate**: If one tool doesn't yield sufficient results, try rephrasing your query for another tool, or use a different tool altogether for the same concept.
-4.  **Synthesize and Structure**: Combine the diverse results from all successful tool calls into a unified, coherent, and highly informative output. Do not just return raw tool outputs. Ensure the information is well-organized and directly supports the generation of varied interview questions (technical, conceptual, scenario-based).
+## How to Use the Tools:
 
-Your final output should be a rich compilation of relevant questions, topics, concepts, and technical details to empower the Question & Answer Generator.
+1. **ALWAYS provide the kb_name parameter** - Use "ai&ml" as default
+2. **Include candidate_context** when available - This helps optimize search
+3. **Choose the right tool** based on query type and candidate level
+
+## Examples:
+
+**Senior Candidate Analysis shows:**
+"Experience: 8 years, Level: Senior, Skills: System Design, Cloud Architecture"
+
+**Appropriate Search:**
+Query: "system design questions for microservices" → vector_search
+
+**Junior Candidate Analysis shows:**
+"Experience: 2 years, Level: Junior, Skills: Python, FastAPI, Basic SQL"
+
+**Appropriate Search:**
+Query: "Python interview questions about lists and dictionaries" → keyword_search
+
+**Mixed Query:**
+"Explain REST API design and common HTTP status codes" → hybrid_search
+
+Return highly relevant questions and concepts tailored to THIS specific candidate.
 """,
-
     # Web Search Agent and its tools
     "web_search_agent": """
 You are a Web Search Agent (Deep Agent) for researching current industry trends.
@@ -138,115 +635,106 @@ Input: technology name. Returns: current version, best practices, usage.""",
     "question_answer_generator": """
 You are the Question & Answer Generator Agent for an AI Interviewer System.
 
-You have access to 3 intelligent sub-agents:
-1. candidate_analysis - Analyzes candidate resume vs job requirements (AGENT with 3 tools)
-2. kb_search - Searches knowledge base for relevant content (DEEP AGENT with 3 tools)
-3. web_search - Researches current trends and technologies (DEEP AGENT with 3 tools)
+  You have access to 3 intelligent sub-agents:
+  1. candidate_analysis - Analyzes candidate resume vs job requirements
+  2. kb_search - Searches knowledge base for relevant content
+  3. web_search - Researches current trends and technologies
+## CRITICAL REQUIREMENT:
+You MUST generate BOTH questions AND comprehensive ideal answers for EVERY question.
 
-IMPORTANT: These are not simple tools - they are intelligent agents that can use their own tools autonomously!
+## Workflow (STRICT ORDER):
+1. candidate_analysis → Wait for complete analysis
+2. kb_search → Use analysis to search KB
+3. web_search → Optional for current trends
+4. Generate questions WITH ideal answers
 
-## Input Format:
+## Output Format - MANDATORY:
+=== CANDIDATE ANALYSIS SUMMARY ===
+[Brief summary of candidate level, skills match, focus areas]
 
-You will receive a request with:
-- **Resume**: Full candidate resume/CV text
-- **Job Profile**: Full job description/requirements
-- **Number of Questions**: How many questions to generate
+=== INTERVIEW QUESTIONS WITH IDEAL ANSWERS ===
 
-## Workflow:
+Question 1: [Specific Project/Technology from Resume]
 
-### Step 1: Candidate Analysis
-CALL the candidate_analysis agent with BOTH the resume and job profile:
-```
-Analyze this candidate for the job.
+Type: Technical/Behavioral/Scenario
+Difficulty: Easy/Medium/Hard
+Personalization: References [project/company/achievement]
 
-Resume:
-[full resume text]
+Question:
+[Concise question mentioning specific project, company, or achievement from resume]
 
-Job Profile:
-[full job description]
-```
+IDEAL ANSWER:
+[Comprehensive answer that THIS candidate should know based on THEIR experience]
 
-The candidate_analysis agent will:
-- Parse the resume (using parse_resume tool)
-- Parse the job description (using parse_job_description tool)
-- Compare and analyze fit (using compare_profiles tool)
-- Return analysis with experience level, skills match, recommended difficulty
+Include technical details they would have encountered
 
-### Step 2: Knowledge Base Search
-Based on the candidate analysis, CALL the kb_search agent:
-```
-Find relevant interview questions for:
-- Experience level: [from analysis]
-- Skills: [from analysis]
-- Domain: [from analysis]
-- Focus areas: [from analysis]
-```
+Reference specific technologies and approaches THEY used
 
-The kb_search agent will:
-- Use vector search for semantic similarity
-- Use keyword search for specific technologies
-- Use topic lookup for question templates
+Explain the "why" behind the approach
 
-### Step 3: Web Research (Optional)
-Optionally CALL the web_search agent for current trends:
-```
-Research current trends for:
-- Technologies: [from resume/job]
-- Industry: [from job profile]
-```
+Include best practices and lessons learned
 
-### Step 4: Generate Questions with Ideal Answers
-Based on all gathered information, generate exactly N questions (where N is from the request).
+Minimum 3-5 substantive paragraphs
 
-## Output Format:
+Key Concepts: [List concepts from their actual work]
 
-Provide a structured response with:
+Question 2: [Another Specific Project/Skill]
+[Same structure with Question + IDEAL ANSWER]
 
-1. **Candidate Analysis Summary**: Brief summary of candidate-job fit
-2. **Questions**: Array of exactly N questions
-3. **Metadata**: Information about generation
+... [Continue for all questions]
 
-Example Output:
-```
-## Candidate Analysis
-[Summary of candidate's experience level, skills match, and focus areas]
+=== GENERATION METADATA ===
 
-## Interview Questions
+Candidate Level: [from analysis]
 
-### Question 1: [Topic Area]
-**Type**: Technical/Behavioral/Scenario
-**Difficulty**: Easy/Medium/Hard
+Total Questions: N
 
-**Question:**
-[Question text]
+Personalization Score: 100%
 
-**Ideal Answer:**
-[Comprehensive ideal answer with key points that should be covered]
+Projects Referenced: [list]
 
-**Key Concepts**: concept1, concept2, concept3
+Companies Referenced: [list]
 
----
+Technologies Referenced: [list]
 
-### Question 2: [Topic Area]
-...
+text
 
-## Metadata
-- Candidate Level: junior/mid/senior
-- Total Questions Generated: N
-- Focus Areas: area1, area2, area3
-- Sources Used: candidate_analysis, kb_search, web_search
-```
+## IDEAL ANSWER REQUIREMENTS:
 
-## Important Rules:
+**EVERY ideal answer MUST:**
+1. **Be comprehensive** - 3-5 paragraphs minimum
+2. **Reference their specific experience** - technologies, projects, companies
+3. **Include technical depth** - specific implementation details
+4. **Explain reasoning** - why certain approaches were used
+5. **Include best practices** - industry standards and lessons
+6. **Be actionable** - what a good candidate should demonstrate
 
-1. **ALWAYS call candidate_analysis FIRST** with both resume and job profile
-2. **ALWAYS call kb_search** based on the analysis
-3. **Generate EXACTLY the number of questions requested**
-4. **Include ideal answers for EVERY question** (this is critical for evaluation)
-5. **Match difficulty to candidate's level** (from analysis)
-6. **Focus on areas identified in the analysis**
+**EXAMPLE IDEAL ANSWER STRUCTURE:**
+IDEAL ANSWER:
 
-REMEMBER: Use your intelligent sub-agents - they will handle the complex analysis for you!
+[Paragraph 1: Context and overview based on their specific project]
+Based on your experience with [Project Name] at [Company], where you achieved [specific metric], the ideal approach would involve...
+
+[Paragraph 2: Technical implementation details]
+Specifically, you would have used [Technology A] for [purpose] and [Technology B] for [another purpose]. The key considerations would be...
+
+[Paragraph 3: Best practices and reasoning]
+This approach follows industry best practices because... The main challenges you would have faced include...
+
+[Paragraph 4: Lessons and alternatives]
+Important lessons from this would be... Alternative approaches could include...
+
+text
+
+## VERIFICATION CHECKLIST:
+- [ ] Every question has an IDEAL ANSWER section
+- [ ] Each ideal answer is 3-5 paragraphs minimum
+- [ ] Answers reference candidate's specific experience
+- [ ] Technical details match their technology stack
+- [ ] Best practices and reasoning are included
+- [ ] No generic textbook answers
+
+FAILURE TO PROVIDE IDEAL ANSWERS WILL RESULT IN POOR INTERVIEWER PREPARATION!
 """,
 
     # Evaluation Pipeline (unchanged)
@@ -432,14 +920,6 @@ def create_candidate_analysis_agent(
 # ==========================================
 # KB SEARCH AGENT & TOOLS (Deep Agent)
 # ==========================================
-from functools import lru_cache
-# Base directory for all knowledge bases
-BASE_KNOWLEDGE_BASES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'knowledge_bases') # Ensure this matches your project structure
-
-def get_faiss_index_path(kb_name: str) -> str:
-    """Constructs the path to the FAISS index for a given knowledge base name."""
-    sanitized_kb_name = kb_name.replace(" ", "_").lower()
-    return os.path.join(BASE_KNOWLEDGE_BASES_DIR, sanitized_kb_name, "faiss_index")
 
 def create_kb_search_agent(
     llm: ChatOpenAI,
@@ -448,188 +928,117 @@ def create_kb_search_agent(
     prompt_label: str = "production"
 ):
     """
-    Create KB Search Agent (Deep Agent with multiple search tools).
-
-    This agent has 3 tools for knowledge base search:
-    1. list_available_knowledge_bases (to discover KBs)
-    2. vector_search (semantic similarity on a chosen KB)
-    3. keyword_search (exact match on a chosen KB)
-    4. topic_lookup (category-based on a chosen KB)
+    Create KB Search Agent with 2 WORKING search tools (vector + keyword).
     """
-    logger.info("Creating KB Search Agent (Deep Agent) with dynamic KB selection...")
-
-    # Initialize Embeddings once for use by search tools
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
-
-    @lru_cache(maxsize=10)
-    # Helper to load a specific vector store when requested by a tool
-    def _load_vector_store(kb_name: str):
-        faiss_index_path = get_faiss_index_path(kb_name)
-        if os.path.exists(faiss_index_path):
-            try:
-                vector_store = FAISS.load_local(
-                    faiss_index_path,
-                    embeddings,
-                    allow_dangerous_deserialization=True
-                )
-                logger.info(f"FAISS index loaded successfully from: {faiss_index_path} for KB '{kb_name}'")
-                return vector_store
-            except Exception as e:
-                logger.error(f"Failed to load FAISS index from {faiss_index_path} for KB '{kb_name}': {e}")
-                return None
-        else:
-            logger.warning(f"FAISS index not found at {faiss_index_path} for KB '{kb_name}'.")
-            return None
+    logger.info("Creating KB Search Agent with 2 search tools...")
 
     @tool
-    def list_available_knowledge_bases() -> str:
+    def vector_search(query: str, candidate_context: Optional[str] = None, kb_name: str = "ai&ml") -> str:
         """
-        Lists all available knowledge bases by inspecting the `knowledge_bases` directory.
-        Returns a JSON string with a list of {'name': 'KB Name', 'role': 'KB Role'} for each KB.
-        """
-        available_kbs = []
-        kb_dirs = [d for d in os.listdir(BASE_KNOWLEDGE_BASES_DIR) if os.path.isdir(os.path.join(BASE_KNOWLEDGE_BASES_DIR, d))]
+        Search vector database using semantic similarity (FAISS).
 
-        for kb_dir_name in kb_dirs:
-            kb_full_path = os.path.join(BASE_KNOWLEDGE_BASES_DIR, kb_dir_name)
-            metadata_path = os.path.join(kb_full_path, "metadata.json")
-            if os.path.exists(metadata_path):
-                try:
-                    with open(metadata_path, 'r') as f:
-                        metadata = json.load(f)
-                        available_kbs.append({"name": metadata.get("name", kb_dir_name), "role": metadata.get("role", "N/A")})
-                except Exception as e:
-                    logger.warning(f"Could not read metadata for KB '{kb_dir_name}': {e}")
-            else:
-                available_kbs.append({"name": kb_dir_name, "role": "No metadata"})
-
-        logger.info(f"Listed {len(available_kbs)} knowledge bases.")
-        return json.dumps(available_kbs)
-
-
-    # Create tools for this agent
-    @tool
-    def vector_search(input_json: str, k: int = 5) -> str:
-        """
-        Search a specific vector database using semantic similarity.
-        The input must be a JSON string with 'kb_name' and 'query_text' fields.
-
-        Finds questions and topics semantically similar to the query.
-        Uses embeddings to find related content even with different wording.
-
-        Args:
-            input_json: JSON string with 'kb_name' (e.g., "ai_&_ml") and 'query_text'
-            k: Number of relevant chunks to retrieve (default: 5)
-
-        Returns:
-            Similar questions and topics from knowledge base,
-            or an error message if the knowledge base is not available.
+        Best for conceptual questions, senior candidates, and broad understanding.
         """
         try:
-            input_data = json.loads(input_json)
-            kb_name = input_data.get('kb_name')
-            query = input_data.get('query_text')
+            logger.info(f"🔍 Performing VECTOR search in KB '{kb_name}' for: {query}")
 
-            if not kb_name or not query:
-                return "Error: Both 'kb_name' and 'query_text' must be provided in the input JSON."
+            results = vector_search_only(kb_name, query, top_k=5)
 
-            vector_store = _load_vector_store(kb_name)
-            if vector_store is None:
-                return f"Error: Knowledge base '{kb_name}' not found or could not be loaded."
+            if not results:
+                return "No relevant content found for vector search."
 
-            # Perform actual vector search
-            docs = vector_store.similarity_search(query, k=k)
-            results = "\n\n".join([doc.page_content for doc in docs])
-            logger.info(f"Vector search completed for query: '{query}' in KB: '{kb_name}'")
-            return results
-        except json.JSONDecodeError:
-            return "Error: Invalid JSON input for vector_search."
+            formatted_results = []
+            for i, doc in enumerate(results, 1):
+                content = doc.page_content
+                source = doc.metadata.get("source", "Knowledge Base")
+                formatted_results.append(f"📄 Result {i} (Vector):\nSource: {source}\nContent: {content}\n")
+
+            output = "\n---\n".join(formatted_results)
+
+            if candidate_context:
+                output = f"🔍 VECTOR SEARCH (Conceptual)\nCandidate Context: {candidate_context[:200]}...\n\n{output}"
+
+            logger.info(f"✅ Vector search completed: {len(results)} results")
+            return output
+
         except Exception as e:
-            logger.error(f"Error in vector search with FAISS for KB '{kb_name}': {e}")
-            return f"Error performing vector search in KB '{kb_name}': {str(e)}"
+            logger.error(f"❌ Error in vector search: {e}")
+            return f"Error performing vector search: {str(e)}"
 
     @tool
-    def keyword_search(input_json: str, k: int = 5) -> str:
+    def keyword_search(keywords: str, candidate_context: Optional[str] = None, kb_name: str = "ai&ml") -> str:
         """
-        Search a specific knowledge base by exact keywords or semantic similarity emphasizing keywords.
-        The input must be a JSON string with 'kb_name' and 'keywords_list' fields.
+        Search knowledge base by exact keywords using BM25.
 
-        Finds content matching specific keywords or technologies.
-        Use for precise technology names, frameworks, or concepts.
-        Currently leverages vector search for a more robust keyword match.
-
-        Args:
-            input_json: JSON string with 'kb_name' (e.g., "ai_&_ml") and 'keywords_list' (comma-separated string)
-            k: Number of relevant chunks to retrieve (default: 5)
-
-        Returns:
-            Matching content from knowledge base.
+        Best for specific technologies, junior candidates, and precise matching.
         """
         try:
-            input_data = json.loads(input_json)
-            kb_name = input_data.get('kb_name')
-            keywords = input_data.get('keywords_list')
+            logger.info(f"🔍 Performing KEYWORD search in KB '{kb_name}' for: {keywords}")
 
-            if not kb_name or not keywords:
-                return "Error: Both 'kb_name' and 'keywords_list' must be provided in the input JSON."
+            results = keyword_search_only(kb_name, keywords, top_k=5)
 
-            vector_store = _load_vector_store(kb_name)
-            if vector_store is None:
-                return f"Error: Knowledge base '{kb_name}' not found or could not be loaded."
+            if not results:
+                return "No relevant content found for keyword search."
 
-            docs = vector_store.similarity_search(keywords, k=k) # Using vector search for keyword matching
-            results = "\n\n".join([doc.page_content for doc in docs])
-            logger.info(f"Keyword search completed for keywords: '{keywords}' in KB: '{kb_name}'")
-            return results
-        except json.JSONDecodeError:
-            return "Error: Invalid JSON input for keyword_search."
+            formatted_results = []
+            for i, doc in enumerate(results, 1):
+                content = doc.page_content
+                source = doc.metadata.get("source", "Knowledge Base")
+                formatted_results.append(f"🔑 Result {i} (Keyword):\nSource: {source}\nContent: {content}\n")
+
+            output = "\n---\n".join(formatted_results)
+
+            if candidate_context:
+                output = f"🔑 KEYWORD SEARCH (Specific)\nCandidate Context: {candidate_context[:200]}...\n\n{output}"
+
+            logger.info(f"✅ Keyword search completed: {len(results)} results")
+            return output
+
         except Exception as e:
-            logger.error(f"Error in keyword search with FAISS for KB '{kb_name}': {e}")
-            return f"Error performing keyword search in KB '{kb_name}': {str(e)}"
+            logger.error(f"❌ Error in keyword search: {e}")
+            return f"Error performing keyword search: {str(e)}"
 
-    @tool
-    def topic_lookup(input_json: str, k: int = 5) -> str:
-        """
-        Find question templates or content by topic category using semantic search within a specific knowledge base.
-        The input must be a JSON string with 'kb_name' and 'topic_name' fields.
+    # Use ONLY 2 tools - vector_search and keyword_search
+    tools = [vector_search, keyword_search]
 
-        Retrieves pre-defined question templates or content for specific topics.
-        Topics include: algorithms, databases, system design, OOP, etc.
+    # Updated system prompt for 2 tools
+    simplified_kb_prompt = """
+You are a Knowledge Base Search Agent with 2 WORKING search tools:
+1. vector_search - Semantic similarity search (FAISS) for conceptual questions
+2. keyword_search - Exact keyword matching (BM25) for specific technologies
 
-        Args:
-            input_json: JSON string with 'kb_name' (e.g., "ai_&_ml") and 'topic_name'
-            k: Number of relevant chunks to retrieve (default: 5)
+## Decision Framework:
 
-        Returns:
-            Question templates and examples for the topic from knowledge base.
-        """
-        try:
-            input_data = json.loads(input_json)
-            kb_name = input_data.get('kb_name')
-            topic = input_data.get('topic_name')
+### USE VECTOR_SEARCH FOR:
+- Senior/Lead level candidates
+- Conceptual/architectural questions
+- System design, best practices
+- Broad understanding topics
+- Example: "system design questions", "software architecture patterns"
 
-            if not kb_name or not topic:
-                return "Error: Both 'kb_name' and 'topic_name' must be provided in the input JSON."
+### USE KEYWORD_SEARCH FOR:
+- Junior/Mid level candidates
+- Specific technologies and tools
+- Precise technical details
+- Targeting skill gaps
+- Example: "Python list methods", "FastAPI routing", "Docker commands"
 
-            vector_store = _load_vector_store(kb_name)
-            if vector_store is None:
-                return f"Error: Knowledge base '{kb_name}' not found or could not be loaded."
+## How to Choose:
 
-            docs = vector_store.similarity_search(f"Interview questions on {topic}", k=k)
-            results = "\n\n".join([doc.page_content for doc in docs])
-            logger.info(f"Topic lookup completed for topic: '{topic}' in KB: '{kb_name}'")
-            return results
-        except json.JSONDecodeError:
-            return "Error: Invalid JSON input for topic_lookup."
-        except Exception as e:
-            logger.error(f"Error in topic lookup with FAISS for KB '{kb_name}': {e}")
-            return f"Error performing topic lookup in KB '{kb_name}': {str(e)}"
+1. **Analyze candidate level** from the context (Senior → vector, Junior → keyword)
+2. **Analyze query type** (Conceptual → vector, Specific → keyword)
+3. **Choose ONE tool** - don't use both for the same query
 
-    # Create the tools list - now includes list_available_knowledge_bases
-    tools = [list_available_knowledge_bases, vector_search, keyword_search, topic_lookup]
+## Examples:
 
-    # Load system prompt from Langfuse or use fallback
-    system_prompt = FALLBACK_PROMPTS["kb_search_agent"]
+**Senior Candidate:** "system design questions for microservices" → vector_search
+**Junior Candidate:** "Python interview questions about lists" → keyword_search
+**Mixed Level:** "REST API design patterns" → vector_search (conceptual)
+
+Return relevant questions and concepts tailored to the candidate.
+"""
+
+    system_prompt = simplified_kb_prompt
     if langfuse_client:
         try:
             prompt_obj = langfuse_client.get_prompt(
@@ -637,21 +1046,17 @@ def create_kb_search_agent(
                 label=prompt_label
             )
             system_prompt = prompt_obj.compile()
-            logger.info("Loaded kb_search_agent prompt from Langfuse")
         except Exception as e:
             logger.warning(f"Failed to load Langfuse prompt: {e}")
 
-    # Create agent using LangChain's create_agent
     agent = create_agent(
         model=llm,
         tools=tools,
         system_prompt=system_prompt
     )
 
-    logger.info(f"KB Search Agent created with {len(tools)} tools, with dynamic KB selection capability.")
+    logger.info(f"✅ KB Search Agent created with {len(tools)} tools")
     return agent
-
-
 # ==========================================
 # WEB SEARCH AGENT & TOOLS (Deep Agent)
 # ==========================================
@@ -866,9 +1271,22 @@ def create_question_answer_generator_agent(
         """
         try:
             logger.info("Invoking Candidate Analysis Agent...")
-            result = candidate_analysis_agent.invoke({
-                "messages": [{"role": "user", "content": input_data}]
-            })
+
+            # Pass langfuse_handler to ensure proper tracing in Langfuse UI
+            if langfuse_handler:
+                config = RunnableConfig(
+                    callbacks=[langfuse_handler],
+                    tags=["candidate_analysis_agent", "sub_agent_invocation"],
+                    metadata={"agent_type": "candidate_analysis"}
+                )
+                result = candidate_analysis_agent.invoke({
+                    "messages": [{"role": "user", "content": input_data}]
+                }, config=config)
+            else:
+                result = candidate_analysis_agent.invoke({
+                    "messages": [{"role": "user", "content": input_data}]
+                })
+
             final_message = result["messages"][-1] if result.get("messages") else None
             output = final_message.content if final_message else "No analysis"
             logger.info("Candidate Analysis Agent completed")
@@ -878,29 +1296,42 @@ def create_question_answer_generator_agent(
             return f"Error: {str(e)}"
 
     @tool
-    def kb_search(query: str) -> str:
+    def kb_search(search_context: str) -> str:
         """
-        Search knowledge base for relevant interview content.
+        KB Search with non-deterministic decision making.
 
-        This is an INTELLIGENT DEEP AGENT that:
-        - Uses vector search for semantic similarity
-        - Uses keyword search for exact matches
-        - Looks up question templates by topic
+        This agent intelligently chooses between vector and keyword search
+        based on candidate analysis and query requirements.
 
         Args:
-            query: Search query based on candidate profile and requirements
+            search_context: JSON string with candidate_analysis and search_query
+            Example: '{"candidate_analysis": "...", "search_query": "..."}'
 
         Returns:
-            Relevant questions, topics, and concepts from knowledge base
+            Relevant questions and concepts tailored to the candidate
         """
         try:
-            logger.info("Invoking KB Search Agent...")
-            result = kb_search_agent.invoke({
-                "messages": [{"role": "user", "content": query}]
-            })
+            logger.info("Invoking KB Search Agent with non-deterministic decision making...")
+
+            # The agent will internally parse and decide which search tool(s) to use
+            # based on the candidate analysis and query
+            if langfuse_handler:
+                config = RunnableConfig(
+                    callbacks=[langfuse_handler],
+                    tags=["kb_search_agent", "sub_agent_invocation", "non_deterministic"],
+                    metadata={"agent_type": "kb_search"}
+                )
+                result = kb_search_agent.invoke({
+                    "messages": [{"role": "user", "content": search_context}]
+                }, config=config)
+            else:
+                result = kb_search_agent.invoke({
+                    "messages": [{"role": "user", "content": search_context}]
+                })
+
             final_message = result["messages"][-1] if result.get("messages") else None
             output = final_message.content if final_message else "No results"
-            logger.info("KB Search Agent completed")
+            logger.info("KB Search Agent completed with non-deterministic decision making")
             return output
         except Exception as e:
             logger.error(f"Error in kb search agent: {e}")
@@ -924,9 +1355,22 @@ def create_question_answer_generator_agent(
         """
         try:
             logger.info("Invoking Web Search Agent...")
-            result = web_search_agent.invoke({
-                "messages": [{"role": "user", "content": query}]
-            })
+
+            # Pass langfuse_handler to ensure proper tracing in Langfuse UI
+            if langfuse_handler:
+                config = RunnableConfig(
+                    callbacks=[langfuse_handler],
+                    tags=["web_search_agent", "sub_agent_invocation", "deep_agent"],
+                    metadata={"agent_type": "web_search"}
+                )
+                result = web_search_agent.invoke({
+                    "messages": [{"role": "user", "content": query}]
+                }, config=config)
+            else:
+                result = web_search_agent.invoke({
+                    "messages": [{"role": "user", "content": query}]
+                })
+
             final_message = result["messages"][-1] if result.get("messages") else None
             output = final_message.content if final_message else "No results"
             logger.info("Web Search Agent completed")
@@ -1209,6 +1653,26 @@ def create_supervisor_tools(
             # Extract final message
             final_message = result["messages"][-1] if result.get("messages") else None
             final_output = final_message.content if final_message else "No questions generated"
+
+            # Extract candidate analysis from the Q&A agent's message history
+            # This is for explainability and will be parsed by agent_service
+            candidate_analysis = None
+            for msg in result.get("messages", []):
+                # Check both regular messages and tool messages
+                if hasattr(msg, 'content') and msg.content:
+                    content_str = str(msg.content)
+                    if "=== CANDIDATE PROFILE ===" in content_str:
+                        candidate_analysis = content_str
+                        logger.info(f"Found candidate analysis in Q&A agent messages ({len(content_str)} chars)")
+                        break
+
+            # Append candidate analysis as a special section if found
+            # This will be parsed out in agent_service.py
+            if candidate_analysis:
+                final_output += f"\n\n<!--CANDIDATE_ANALYSIS_START-->\n{candidate_analysis}\n<!--CANDIDATE_ANALYSIS_END-->"
+                logger.info("Candidate analysis appended to tool output")
+            else:
+                logger.warning("No candidate analysis found in Q&A agent messages")
 
             logger.info("Question & Answer generation completed")
             return final_output

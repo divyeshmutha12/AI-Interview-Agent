@@ -2,11 +2,16 @@ langchain
 langchain-openai
 langchain-core
 langgraph
+langchain-community
+faiss-cpu
 openai
 langfuse
 python-dotenv
 pydantic
 typing-extensions
+pytesseract
+pillow
+pymupdf
 
 # Document parsing
 PyPDF2>=3.0.0
@@ -15,3 +20,11 @@ python-docx>=1.0.0
 
 # Web interface
 streamlit>=1.30.0
+
+# KB Search - Hybrid Retrieval
+rank-bm25>=0.2.2
+
+
+
+
+

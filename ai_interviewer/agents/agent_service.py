@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from typing import Dict, Any, Optional
 import logging
 import os
+import re
 from dotenv import load_dotenv
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
@@ -43,7 +44,7 @@ class AgentService:
     def __init__(
         self,
         openai_api_key: Optional[str] = None,
-        openai_model: str = "gpt-4o-mini",
+        openai_model: Optional[str] = None,
         langfuse_public_key: Optional[str] = None,
         langfuse_secret_key: Optional[str] = None,
         langfuse_host: Optional[str] = None,
@@ -68,43 +69,52 @@ class AgentService:
 
         # Setup OpenAI
         self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-        self.openai_model = openai_model or os.getenv("OPENAI_MODEL", "gpt-4o")
+        self.openai_model = openai_model or os.getenv("OPENAI_MODEL")
 
         # Setup Prompt Label (allows per-developer or per-environment configuration)
         self.prompt_label = prompt_label or os.getenv("LANGFUSE_PROMPT_LABEL", "production")
         logger.info(f"Using prompt label: {self.prompt_label}")
 
+        # Validate required configuration
         if not self.openai_api_key:
             raise ValueError("OpenAI API key not provided")
 
-        self.llm = ChatOpenAI(
-            model=self.openai_model,
-            api_key=self.openai_api_key,
-            temperature=0.7
-        )
-        logger.info(f"OpenAI LLM initialized with model: {self.openai_model}")
+        if not self.openai_model:
+            raise ValueError(
+                "OpenAI model not provided. "
+                "Please set OPENAI_MODEL in .env file or pass openai_model parameter."
+            )
 
-        # Setup Langfuse
+        # ----------------------------
+        # 1️⃣ Initialize Langfuse FIRST
+        # ----------------------------
         self.langfuse_client = None
         self.langfuse_handler = None
 
         try:
-            # Initialize Langfuse client for prompt management
             self.langfuse_client = Langfuse(
                 public_key=langfuse_public_key or os.getenv("LANGFUSE_PUBLIC_KEY"),
                 secret_key=langfuse_secret_key or os.getenv("LANGFUSE_SECRET_KEY"),
                 host=langfuse_host or os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
             )
-
-            # Initialize CallbackHandler for tracing
-            # Note: In Langfuse v3, credentials are configured via environment variables
-            # or through the Langfuse client. The CallbackHandler takes no constructor args.
             self.langfuse_handler = CallbackHandler()
-
             logger.info("Langfuse initialized successfully")
+
         except Exception as e:
             logger.warning(f"Failed to initialize Langfuse: {e}")
             logger.info("Continuing without Langfuse (using fallback prompts)")
+            self.langfuse_handler = None
+
+        # ------------------------------------
+        # 2️⃣ Now safely initialize the OpenAI LLM
+        # ------------------------------------
+        self.llm = ChatOpenAI(
+            model=self.openai_model,
+            api_key=self.openai_api_key,
+            temperature=0.3,
+            callbacks=[self.langfuse_handler] if self.langfuse_handler else None
+        )
+        logger.info(f"OpenAI LLM initialized with model: {self.openai_model}")
 
         # Initialize agents and pipelines
         logger.info("Initializing Question & Answer Generator Agent...")
@@ -202,6 +212,8 @@ class AgentService:
             # Extract tool calls to determine which agent/pipeline was used
             tool_used = None
             pipeline_name = None
+            candidate_analysis_output = None
+
             for message in result.get("messages", []):
                 if hasattr(message, 'tool_calls') and message.tool_calls:
                     tool_used = message.tool_calls[0]['name']
@@ -211,12 +223,40 @@ class AgentService:
                         pipeline_name = "Answer Evaluation"
                     break
 
+            # Extract and parse Candidate Analysis from TOOL MESSAGES (not final message)
+            # The candidate analysis is embedded with special markers by the tool
+            # We need to look in ToolMessage types, not the supervisor's final response
+            ca_pattern = r'<!--CANDIDATE_ANALYSIS_START-->\n(.*?)\n<!--CANDIDATE_ANALYSIS_END-->'
+
+            for message in result.get("messages", []):
+                # Check if this is a ToolMessage (has 'type' attribute or 'name' attribute)
+                is_tool_message = (
+                    hasattr(message, 'type') and message.type == 'tool'
+                ) or (
+                    hasattr(message, 'name') and message.name in ['generate_questions_and_answers', 'evaluate_answer']
+                ) or (
+                    message.__class__.__name__ == 'ToolMessage'
+                )
+
+                if is_tool_message and hasattr(message, 'content') and message.content:
+                    content_str = str(message.content)
+                    ca_match = re.search(ca_pattern, content_str, re.DOTALL)
+
+                    if ca_match:
+                        candidate_analysis_output = ca_match.group(1).strip()
+                        logger.info(f"Candidate analysis extracted successfully from tool message ({len(candidate_analysis_output)} chars)")
+                        break
+
+            if not candidate_analysis_output:
+                logger.warning("No candidate analysis found in tool messages")
+
             # Prepare output
             final_output = {
                 "user_input": user_input,
                 "result": final_result,
                 "tool_used": tool_used,
                 "pipeline": pipeline_name,
+                "candidate_analysis": candidate_analysis_output,  # Add CA output
                 "metadata": {
                     "user_id": user_id,
                     "session_id": session_id,

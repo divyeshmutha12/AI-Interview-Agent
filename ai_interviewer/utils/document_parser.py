@@ -9,12 +9,12 @@ import logging
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-# PDF parsing
+# PDF parsing - PyMuPDF (primary)
 try:
-    import PyPDF2
-    PDF_AVAILABLE = True
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
 except ImportError:
-    PDF_AVAILABLE = False
+    PYMUPDF_AVAILABLE = False
 
 # DOCX parsing
 try:
@@ -23,7 +23,7 @@ try:
 except ImportError:
     DOCX_AVAILABLE = False
 
-# Alternative PDF parser (if PyPDF2 doesn't work well)
+# Alternative PDF parser (fallback)
 try:
     import pdfplumber
     PDFPLUMBER_AVAILABLE = True
@@ -40,20 +40,20 @@ class DocumentParser:
     Supports multiple PDF parsing libraries for better compatibility.
     """
 
-    def __init__(self, prefer_pdfplumber: bool = True):
+    def __init__(self, prefer_pdfplumber: bool = False):
         """
         Initialize the document parser.
 
         Args:
-            prefer_pdfplumber: If True and available, use pdfplumber instead of PyPDF2
-                             (pdfplumber often gives better results)
+            prefer_pdfplumber: If True and available, use pdfplumber instead of PyMuPDF
+                             (PyMuPDF is faster and more reliable by default)
         """
         self.prefer_pdfplumber = prefer_pdfplumber
 
         # Log available parsers
         parsers = []
-        if PDF_AVAILABLE:
-            parsers.append("PyPDF2")
+        if PYMUPDF_AVAILABLE:
+            parsers.append("PyMuPDF")
         if PDFPLUMBER_AVAILABLE:
             parsers.append("pdfplumber")
         if DOCX_AVAILABLE:
@@ -108,17 +108,17 @@ class DocumentParser:
             try:
                 return self._parse_pdf_pdfplumber(file_path)
             except Exception as e:
-                logger.warning(f"pdfplumber failed, trying PyPDF2: {e}")
-                if PDF_AVAILABLE:
-                    return self._parse_pdf_pypdf2(file_path)
+                logger.warning(f"pdfplumber failed, trying PyMuPDF: {e}")
+                if PYMUPDF_AVAILABLE:
+                    return self._parse_pdf_pymupdf(file_path)
                 raise
 
-        # Try PyPDF2
-        if PDF_AVAILABLE:
+        # Try PyMuPDF (primary parser)
+        if PYMUPDF_AVAILABLE:
             try:
-                return self._parse_pdf_pypdf2(file_path)
+                return self._parse_pdf_pymupdf(file_path)
             except Exception as e:
-                logger.warning(f"PyPDF2 failed: {e}")
+                logger.warning(f"PyMuPDF failed: {e}")
                 if PDFPLUMBER_AVAILABLE:
                     logger.info("Trying pdfplumber as fallback...")
                     return self._parse_pdf_pdfplumber(file_path)
@@ -130,25 +130,26 @@ class DocumentParser:
 
         raise RuntimeError(
             "No PDF parsing library available. "
-            "Install PyPDF2 or pdfplumber: pip install PyPDF2 pdfplumber"
+            "Install PyMuPDF: pip install pymupdf"
         )
 
-    def _parse_pdf_pypdf2(self, file_path: Path) -> str:
-        """Parse PDF using PyPDF2"""
-        logger.info(f"Parsing PDF with PyPDF2: {file_path.name}")
+    def _parse_pdf_pymupdf(self, file_path: Path) -> str:
+        """Parse PDF using PyMuPDF (fitz)"""
+        logger.info(f"Parsing PDF with PyMuPDF: {file_path.name}")
 
         text = []
-        with open(file_path, 'rb') as file:
-            pdf_reader = PyPDF2.PdfReader(file)
-            num_pages = len(pdf_reader.pages)
+        doc = fitz.open(str(file_path))
+        num_pages = doc.page_count
 
-            logger.info(f"Processing {num_pages} pages...")
+        logger.info(f"Processing {num_pages} pages...")
 
-            for page_num in range(num_pages):
-                page = pdf_reader.pages[page_num]
-                page_text = page.extract_text()
-                if page_text:
-                    text.append(page_text)
+        for page_num in range(num_pages):
+            page = doc[page_num]
+            page_text = page.get_text()
+            if page_text:
+                text.append(page_text.strip())
+
+        doc.close()
 
         result = '\n\n'.join(text)
         logger.info(f"Extracted {len(result)} characters from PDF")
@@ -245,7 +246,7 @@ class DocumentParser:
     def get_supported_formats() -> list:
         """Get list of supported file formats"""
         formats = ['.txt']
-        if PDF_AVAILABLE or PDFPLUMBER_AVAILABLE:
+        if PYMUPDF_AVAILABLE or PDFPLUMBER_AVAILABLE:
             formats.append('.pdf')
         if DOCX_AVAILABLE:
             formats.append('.docx')
