@@ -24,6 +24,7 @@ from .sub_agents import (
     EvaluationPipeline,
     create_supervisor_tools
 )
+from ..utils.knowledge_base_manager import KnowledgeBaseManager
 
 # Setup logging
 logging.basicConfig(
@@ -114,10 +115,25 @@ class AgentService:
             logger.warning(f"Failed to initialize Langfuse: {e}")
             logger.info("Continuing without Langfuse (using fallback prompts)")
 
+        # Initialize Knowledge Base Manager
+        logger.info("Initializing Knowledge Base Manager with FAISS...")
+        try:
+            self.kb_manager = KnowledgeBaseManager(openai_api_key=self.openai_api_key)
+            kb_stats = self.kb_manager.get_stats()
+            logger.info(
+                f"Knowledge Base loaded: {kb_stats['total_documents']} documents, "
+                f"{kb_stats['total_chunks']} chunks indexed"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize Knowledge Base: {e}")
+            logger.info("Continuing without Knowledge Base (search will return empty results)")
+            self.kb_manager = None
+
         # Initialize agents and pipelines
         logger.info("Initializing Question & Answer Generator Agent...")
         self.qg_agent = create_question_answer_generator_agent(
             llm=self.llm,
+            kb_manager=self.kb_manager,
             langfuse_client=self.langfuse_client,
             langfuse_handler=self.langfuse_handler,
             prompt_label=self.prompt_label

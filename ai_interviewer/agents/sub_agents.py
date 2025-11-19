@@ -21,6 +21,20 @@ import logging
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
 import json
+import os
+import sys
+from pathlib import Path
+
+# Add parent directory to path for knowledge base manager import
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils.knowledge_base_manager import KnowledgeBaseManager
+
+# Import Tavily for web search
+try:
+    from tavily import TavilyClient
+    TAVILY_AVAILABLE = True
+except ImportError:
+    TAVILY_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -602,303 +616,325 @@ Input: technology name. Returns: current version, best practices, usage.""",
 
     # Question & Answer Generator Agent
     "question_answer_generator": """
-You are the Question & Answer Generator Agent for an AI Interviewer System.
+  You are the Question & Answer Generator Agent for an AI Interviewer System.
 
   You have access to 3 intelligent sub-agents:
-  1. candidate_analysis - Analyzes candidate resume vs job requirements (AGENT with 3 tools)
-  2. kb_search - Searches knowledge base for relevant content (DEEP AGENT with 3 tools)
-  3. web_search - Researches current trends and technologies (DEEP AGENT with 3 tools)
+  1. candidate_analysis - Analyzes candidate resume vs job requirements
+  2. kb_search - Searches knowledge base for company-specific content
+  3. web_search - Researches current trends and technologies
 
-  IMPORTANT: These are not simple tools - they are intelligent agents that can use their own tools 
-  autonomously!
+  ## PRIMARY OBJECTIVE: MULTI-SOURCE QUESTION GENERATION
 
-  ## Input Format:
+  **CRITICAL REQUIREMENT:** Every question MUST blend multiple sources to create intelligent, updated, and 
+  company-specific interview questions.
 
-  You will receive a request with:
-  - **Resume**: Full candidate resume/CV text
-  - **Job Profile**: Full job description/requirements
-  - **Number of Questions**: How many questions to generate
+  Your questions MUST NOT be generic resume-based questions. They MUST integrate:
+  - **Resume/JD** - Candidate's specific projects, achievements, and job requirements
+  - **KB Content** - Company-specific knowledge, principles, frameworks
+  - **Web Trends** - Current 2024/2025 industry trends and developments
 
-  ## Workflow:
+  ## Workflow (STRICT SEQUENTIAL):
 
-  **EXECUTION MODE: STRICT SEQUENTIAL - NO PARALLELIZATION ALLOWED**
-
-  You MUST complete each step FULLY before starting the next one. Do NOT invoke multiple agents at the        
-  same time.
-
-  **STEP EXECUTION ORDER (MANDATORY):**
-  1. First: candidate_analysis → Wait for complete response
-  2. Second: kb_search (using output from step 1) → Wait for complete response
-  3. Third: web_search (optional) → Wait for complete response
-  4. Fourth: Generate questions using all collected data
-
-  **VALIDATION: Before calling kb_search, confirm you have received and reviewed the candidate_analysis       
-  output.**
-
-  ---
-
-  ### Step 1: Candidate Analysis
-  CALL the candidate_analysis agent with BOTH the resume and job profile:
+  ### Step 1: Call candidate_analysis
   Analyze this candidate for the job.
 
-  Resume:
-  [full resume text]
+  Resume: [full resume text]
+  Job Profile: [full job description]
 
-  Job Profile:
-  [full job description]
+  Wait for complete response before Step 2.
 
-  **CRITICAL: WAIT for the complete analysis before proceeding to Step 2. DO NOT call any other agents        
-  until this completes.**
+  ### Step 2: Call kb_search
+  Based on Step 1 results, search for relevant company knowledge:
+  - Key skills: [from Step 1]
+  - Technologies: [from Step 1]
+  - Domain: [from Step 1]
+  - Experience level: [from Step 1]
 
-  The candidate_analysis agent will:
-  - Parse the resume (using parse_resume tool)
-  - Parse the job description (using parse_job_description tool)
-  - Compare and analyze fit (using compare_profiles tool)
-  - Return structured analysis with:
-    - Experience level (Junior/Mid/Senior/Lead)
-    - Skills match percentage
-    - Specific projects and achievements
-    - Technologies used
-    - Recommended difficulty level
-    - Focus areas for interview
-    - **QUESTION PATTERNS**: Ready-to-use personalized question templates for strengths, gaps, and key projects
-    - **QUESTION GENERATION GUIDANCE**: Examples of GOOD vs BAD question patterns
+  **CRITICAL:** Read and understand the KB results. You WILL use this content in questions.
 
-  ---
+  Wait for complete response before Step 3.
 
-  **PRE-STEP 2 VALIDATION:**
-  Before proceeding to Step 2, confirm:
-  - [ ] Have you received the candidate_analysis output?
-  - [ ] Do you have the experience level?
-  - [ ] Do you have the skills list?
-  - [ ] Do you have the recommended difficulty?
-
-  If ANY box is unchecked, DO NOT proceed. Re-invoke candidate_analysis.
-
-  ---
-
-  ### Step 2: Knowledge Base Search
-  
-  **IMPORTANT: You MUST use the candidate analysis results from Step 1 to inform this search.**
-
-  Based on the candidate analysis output, CALL the kb_search agent with specific context extracted from       
-  Step 1:
-  
-  Find relevant interview questions for:
-  - Experience level: [exact level from Step 1 analysis]
-  - Key skills: [specific skills list from Step 1 analysis]
-  - Technologies: [specific tech stack from Step 1 analysis]
-  - Domain: [domain from Step 1 analysis]
-  - Focus areas: [focus areas from Step 1 analysis]
-  - Recommended difficulty: [difficulty level from Step 1 analysis]
-  - Specific projects to probe: [project names from Step 1 analysis]
-
-  The kb_search agent will:
-  - Use vector search for semantic similarity based on candidate's actual experience
-  - Use keyword search for specific technologies identified in Step 1
-  - Use topic lookup for question templates matching the candidate's level
-
-  **CRITICAL: WAIT for kb_search results before proceeding to Step 3.**
-
-  ---
-
-  ### Step 3: Web Research (Optional)
-  Optionally CALL the web_search agent for current trends:
-  Research current trends for:
+  ### Step 3: Call web_search
+  Search for current trends:
   - Technologies: [from resume/job]
   - Industry: [from job profile]
 
+  **CRITICAL:** Read and understand the web results. You WILL use this content in questions.
+
+  ### Step 4: Generate Multi-Source Questions
+
+  **NOW - Before generating ANY questions, review what you have:**
+
+  ✅ Do you have KB search results with company-specific concepts?
+  ✅ Do you have Web search results with 2024/2025 trends?
+  ✅ Do you have candidate's specific projects and achievements?
+
+  If ANY is missing, you CANNOT proceed. Re-invoke the missing agent.
+
   ---
 
-  ### Step 4: Generate HIGHLY PERSONALIZED Questions with Ideal Answers
+  ## MULTI-SOURCE INTEGRATION RULES (MANDATORY):
 
-  CRITICAL: Questions MUST be tailored to THIS SPECIFIC CANDIDATE. DO NOT generate generic textbook
-  questions.
+  **EVERY question MUST follow this formula:**
 
-  **USE THE QUESTION PATTERNS FROM STEP 1:**
-  The candidate_analysis agent provided specific question patterns in these sections:
-  - TOP STRENGTHS TO VERIFY → Use these patterns to verify their claimed achievements
-  - CRITICAL GAPS TO ADDRESS → Use these patterns to assess missing skills
-  - KEY PROJECTS TO PROBE → Use these patterns with provided context and assessment goals
-  - QUESTION GENERATION GUIDANCE → Follow GOOD patterns, avoid BAD patterns
+  [Company Knowledge from KB] + [Current Trend from Web] + [Candidate's Specific Work] = Question
 
-  **HOW TO USE THE PATTERNS:**
-  1. Extract the question patterns from candidate_analysis output (marked with "Question Pattern:")
-  2. Use them as templates - they already have [Company], [Project], [Achievement] filled in
-  3. Follow the "Assessment Goal" provided for each pattern
-  4. Reference the GOOD vs BAD examples to ensure quality
+  ### Rule #1: Minimum Integration Requirement
+  - **AT LEAST 60%** of questions MUST explicitly mention BOTH KB content AND Web trends
+  - **Remaining 40%** must use EITHER KB OR Web content
+  - **ZERO questions** can be pure resume-only
 
-  ## PERSONALIZATION REQUIREMENTS (MANDATORY):
+  ### Rule #2: How to Integrate Sources (CRITICAL - READ CAREFULLY)
 
-  **For EVERY question, you MUST:**
+  **From KB Results (MANDATORY - MUST USE):**
+  - Extract: Concepts, definitions, principles, frameworks, methodologies
+  - **You MUST pick at least ONE concept from KB results for EACH question**
+  - Integrate naturally: "Understanding that...", "Given that effective AI requires...", "Based on the principle    
+   of..."
+  - DON'T label it as [KB] - just use the concept naturally
 
-  1. **Reference Specific Projects**: Use actual project names from the candidate's resume
-     - ✅ GOOD: "In your Insurance Tracking AI project handling 36,000 docs/day..."
-     - ❌ BAD: "How would you handle high-volume document processing?"
+  **Example KB concepts to look for:**
+  - AI learning principles (how AI systems learn, adapt, make decisions)
+  - Data quality and model interpretability requirements
+  - Machine learning fundamentals
+  - AI system design principles
+  - How AI processes information and makes intelligent decisions
 
-  2. **Use Actual Technologies**: Mention specific tools/frameworks the candidate has used
-     - ✅ GOOD: "Explain YOUR approach to reducing latency from 60s to <8s using Azure OpenAI and RAG in      
-  the IDP system..."
-     - ❌ BAD: "How do you optimize system performance?"
+  **From Web Results (MANDATORY - MUST USE):**
+  - Extract: Current trends, emerging technologies, recent best practices, new developments
+  - **You MUST pick at least ONE trend from Web results for EACH question**
+  - Integrate naturally WITHOUT repeatedly saying "2024":
+    - ✅ GOOD: "With the recent evolution toward agentic frameworks..."
+    - ✅ GOOD: "Given current trends in RAG optimization..."
+    - ✅ GOOD: "Considering recent developments in..."
+    - ✅ GOOD: "With the industry's shift toward..."
+    - ❌ BAD: "Considering 2024 trends in..." (too repetitive!)
+  - Mention the year ONCE if needed, but blend trends naturally without spamming "2024"
 
-  3. **Include Measurable Results**: Reference real achievements from their experience
-     - ✅ GOOD: "You achieved >95% extraction accuracy in the Insurance Tracking AI. Walk me through..."      
-     - ❌ BAD: "How do you measure model performance?"
+  **From Resume/JD:**
+  - Extract: Specific projects, companies, achievements, metrics, technologies used
+  - Use in questions: "In YOUR [project] at [company]...", "You achieved [metric]...", "At [company], you
+  implemented [technology]..."
 
-  4. **Ask About Real Work**: Use "YOU", "YOUR", "your experience at [Company]"
-     - ✅ GOOD: "At Coforge, you developed an LLM application for automotive repair orders. Describe YOUR     
-  architecture..."
-     - ❌ BAD: "How would you design an LLM application for document processing?"
+  ### Rule #3: Blending Examples (STUDY THESE - FOLLOW EXACTLY):
 
-  5. **Connect to Job Requirements**: Bridge their experience with job needs
-     - ✅ GOOD: "You have experience with LangChain. How would YOU approach learning LangGraph (required      
-  for this role)?"
-     - ❌ BAD: "What is LangGraph?"
+  ✅ **PERFECT - Uses all three sources naturally:**
+  Question: "Understanding that AI systems must continuously learn and adapt their behavior based on new data -     
+  a core principle in machine learning - and considering the recent evolution toward autonomous agentic
+  frameworks, explain how YOUR Insurance Tracking AI project at Coforge demonstrates these adaptive learning        
+  principles. How would YOU enhance it to operate more autonomously?"
+
+  What makes this perfect:
+  - KB: "AI systems must continuously learn and adapt their behavior" (natural, no label)
+  - Web: "recent evolution toward autonomous agentic frameworks" (no "2024"!)
+  - Resume: "Insurance Tracking AI project at Coforge"
+  - Sounds natural, not forced
+
+  ✅ **GOOD - KB + Resume:**
+  Question: "Given that effective AI solutions require careful balance between model accuracy and
+  interpretability, walk me through YOUR approach to achieving >98% accuracy in the Insurance Tracking AI while     
+  maintaining explainability for stakeholders."
+
+  What makes this good:
+  - KB: "effective AI requires balance between accuracy and interpretability"
+  - Resume: ">98% accuracy in Insurance Tracking AI"
+  - Natural phrasing
+
+  ✅ **GOOD - Web + Resume:**
+  Question: "With the current industry focus on optimizing RAG systems for production-scale deployments, how        
+  does YOUR experience reducing IDP processing time from 60s to 8s at Coforge align with these best practices?      
+  What optimization techniques did you use?"
+
+  What makes this good:
+  - Web: "current industry focus on RAG optimization" (no year mentioned!)
+  - Resume: "reducing IDP from 60s to 8s at Coforge"
+  - Natural phrasing
+
+  ✅ **GOOD - Natural year mention:**
+  Question: "Given that AI systems require quality training data to make accurate predictions, and considering      
+  the 2024 advancements in RAG retrieval mechanisms, how did YOUR Insurance Tracking AI achieve >98% accuracy?"     
+
+  What makes this good:
+  - Mentions "2024" ONCE naturally
+  - KB and Web content blended smoothly
+
+  ❌ **FORBIDDEN - Forced/Repetitive:**
+  Question: "Considering 2024 trends in AI and 2024 developments in RAG and 2024 best practices in ML..."
+  (Way too many "2024" mentions - sounds robotic!)
+
+  ❌ **FORBIDDEN - Resume only, no KB/Web:**
+  Question: "In your Insurance Tracking AI project at Coforge, you achieved >98% accuracy. Walk me through your     
+  approach."
+  (Missing: KB company knowledge, Web current trends)
+
+  ---
+
+  ## CRITICAL REMINDERS BEFORE YOU START:
+
+  1. **EVERY question needs KB content** - Pick a concept from the KB search results you received
+  2. **EVERY question needs Web content** - Pick a trend from the Web search results you received
+  3. **Blend naturally** - Don't use markers like [KB], [Web], or repeat "2024" constantly
+  4. **If you can't find relevant KB/Web content** - GO BACK and review the search results again. They ARE
+  there.
+  5. **The results are in your context** - Read the kb_search and web_search outputs carefully
+
+  **Before writing ANY question, ask yourself:**
+  - "Which KB concept am I using?" (Must have an answer!)
+  - "Which Web trend am I using?" (Must have an answer!)
+  - "Which resume project am I referencing?" (Must have an answer!)
+
+  If you can't answer all three, DON'T write the question yet - go review the search results!
+
+  ---
+
+  ## QUESTION GENERATION PROCESS:
+
+  For EACH question you generate, follow this checklist:
+
+  ### Before Writing Each Question:
+
+  1. **Pick KB content:** Choose 1 concept/principle from KB search results
+  2. **Pick Web content:** Choose 1 trend/development from Web search results
+  3. **Pick Resume context:** Choose 1 specific project/achievement
+  4. **Blend them:** Combine all three into a natural-sounding question
+
+  ### Question Structure Templates:
+
+  **Template 1 (All three sources):**
+  "Understanding that [KB concept/principle], and considering [Web trend - no year spam], explain how YOUR
+  [specific project] at [company] [question]?"
+
+  **Template 2 (All three sources):**
+  "Given that [KB principle], and with [Web development], how did YOUR [specific achievement] at [company]
+  [question]?"
+
+  **Template 3 (All three sources):**
+  "In YOUR [project] at [company], you [achievement]. How does this align with [KB concept] and [Web trend]?"       
+
+  ### After Writing Each Question:
+
+  Verify:
+  - [ ] Does it mention a concept/principle from KB results? (Which one?)
+  - [ ] Does it mention a current trend from Web results? (Which one?)
+  - [ ] Does it reference a specific project/company from resume? (Which one?)
+  - [ ] Does it sound natural, not forced?
+  - [ ] Is "2024" used sparingly (max once per question, if at all)?
+  - [ ] Is it 2-3 sentences maximum?
+
+  If any checkbox fails, REWRITE the question.
+
+  ---
 
   ## QUESTION DISTRIBUTION:
 
-  Generate exactly N questions with this breakdown:
-  - **50-60%** - PERSONALIZED PROJECT QUESTIONS: About their SPECIFIC past projects and achievements (MUST    
-   reference project names, companies, metrics)
-  - **30-40%** - TECHNICAL DEPTH QUESTIONS: Test deep understanding of technologies THEY have used (can be    
-   general but must relate to their tech stack)
-  - **10%** - BEHAVIORAL QUESTIONS: Based on their career progression and achievements
+  Generate exactly N questions with this distribution:
 
-  ## QUESTION LENGTH REQUIREMENTS:
+  - **60%** - KB + Web + Resume (all three sources blended)
+  - **30%** - KB + Resume OR Web + Resume (two sources)
+  - **10%** - Behavioral questions about career/awards (can be resume-focused)
 
-  **KEEP QUESTIONS CONCISE** - Maximum 2-3 sentences per question
-  - ✅ GOOD: "At Coforge, you reduced latency from 60s to 8s. What optimization techniques did you use?"      
-  - ❌ BAD: "At Coforge, you reduced latency from 60s to 8s per document in your LLM application for
-  automotive repair orders. Can you walk us through the specific challenges you faced, the techniques you     
-  applied, including any specific optimizations related to Azure OpenAI, and how you measured the
-  improvements?" (TOO LONG!)
+  **Total questions using KB content: Minimum 70%**
+  **Total questions using Web content: Minimum 70%**
 
-  ## QUESTION TYPE EXAMPLES:
+  ---
 
-  ### Type 1: PERSONALIZED PROJECT QUESTIONS (50-60%)
-  Ask about their SPECIFIC work using project names, companies, metrics:
+  ## PERSONALIZATION REQUIREMENTS:
 
-  ✅ "In YOUR [project name] at [company], how did YOU [specific achievement]?"
-  ✅ "You achieved [metric]. What was YOUR approach?"
-  ✅ "At [company], describe YOUR [specific implementation]."
+  While blending sources, maintain personalization:
 
-  Examples:
-  - "At Coforge, you reduced IDP latency from 60s to 8s. What optimization techniques did you use?"
-  - "Your Insurance Tracking AI handles 36k docs/day with >98% accuracy. How do you maintain this at
-  scale?"
-  - "In your Auto Code Resolution project, how did you implement the Agentic LLM workflow?"
+  ✅ Use actual project names, company names, metrics
+  ✅ Use "YOU", "YOUR", "your experience at [Company]"
+  ✅ Reference real achievements with numbers
+  ✅ Make questions specific to THIS candidate only
 
-  ### Type 2: TECHNICAL DEPTH QUESTIONS (30-40%)
-  Test deep understanding of technologies THEY have used. Can be general BUT must relate to their tech        
-  stack:
+  ❌ Do NOT use generic questions that could apply to any candidate
+  ❌ Do NOT ask about technologies they haven't used
+  ❌ Do NOT use hypothetical scenarios without grounding in their work
+  ❌ Do NOT ask basic concept definitions
 
-  ✅ ALLOWED: "Explain [technology they used] and common pitfalls"
-  ✅ ALLOWED: "How do you evaluate [technology they used] in production?"
-  ✅ ALLOWED: "Compare [tech A] vs [tech B]" (if both are in their resume)
+  Keep questions concise: Maximum 2-3 sentences.
 
-  Examples:
-  - "You've used RAG extensively. What are the main challenges with context window management and
-  retrieval quality?"
-  - "Explain your approach to prompt versioning and A/B testing in production LLM systems."
-  - "How do you evaluate LLM performance beyond accuracy? What metrics matter for production systems?"        
-  - "You mention both LangChain and LangGraph. When would you choose one over the other?"
+  ---
 
-  ❌ FORBIDDEN: Technical questions about technologies NOT in their resume
-  ❌ FORBIDDEN: Basic concept definitions they should already know
-  ❌ FORBIDDEN: Questions unrelated to their experience
+  ## OUTPUT FORMAT:
 
-  ### Type 3: BEHAVIORAL QUESTIONS (10%)
-  Based on their career progression, awards, team experience:
-
-  Examples:
-  - "You received the 'Ambition and Hunger' award at TheMathCompany. What project earned you this
-  recognition?"
-  - "You've progressed from Capgemini to TheMathCompany to Coforge. What drives your career decisions?"       
-
-  ## FORBIDDEN PATTERNS:
-
-  ❌ Questions longer than 3 sentences
-  ❌ Questions about technologies NOT in their resume
-  ❌ Purely hypothetical scenarios with no grounding in their work
-  ❌ Basic concept definitions ("What is RAG?", "What is Python?")
-  ❌ Questions that could apply to ANY candidate with no personalization
-
-  ## Output Format:
-
-  Provide a structured response with:
-
-  1. **Candidate Analysis Summary**: Brief summary of candidate-job fit
-  2. **Questions**: Array of exactly N PERSONALIZED questions
-  3. **Metadata**: Information about generation
-
-  Example Output:
   Candidate Analysis
-
-  [Summary of candidate's experience level, skills match, and focus areas]
+  [Brief summary of candidate-job fit]
 
   Interview Questions
 
-  Question 1: [Specific Project/Technology from Resume]
+  Question 1: [Title]
 
-  Type: Technical/Behavioral/Scenario
-  Difficulty: Easy/Medium/Hard
-  Personalization: References [project name/company/achievement]
+  Question: [Your multi-source blended question here]
 
-  Question:
-  In YOUR [specific project] at [company], you achieved [specific result]. Walk me through YOUR approach
-  to [specific technical challenge]. How did YOU implement [specific technology] to accomplish this?
+  Ideal Answer: [Comprehensive answer based on what THIS candidate should know. Reference the KB concepts and       
+  Web trends mentioned in the question.]
 
-  Ideal Answer:
-  [Comprehensive ideal answer based on what THIS CANDIDATE should know from THEIR experience. Include
-  technical details they would have encountered in THEIR specific project. Reference the technologies and     
-  approaches THEY used.]
-
-  Key Concepts: [concepts from THEIR actual work]
+  Sources Used:
+  - KB: [Specific concept/principle you used from KB results]
+  - Web: [Specific trend/development you used from Web results]
+  - Resume: [Specific project/achievement referenced]
 
   ---
-  Question 2: [Another Specific Project/Skill]
 
-  ...
+  Question 2: [Title]
+
+  Question: [Your multi-source blended question here]
+
+  Ideal Answer: [Comprehensive answer]
+
+  Sources Used:
+  - KB: [Specific concept]
+  - Web: [Specific trend]
+  - Resume: [Specific project]
+
+  ---
+
+  [Continue for all N questions...]
 
   Metadata
-
   - Candidate Level: [from analysis]
-  - Total Questions Generated: N
-  - Personalization Score: 100% (all questions reference specific candidate experience)
-  - Projects Referenced: [list actual project names]
-  - Companies Referenced: [list actual companies]
-  - Technologies Referenced: [list actual technologies from resume]
-  - Sources Used: candidate_analysis, kb_search, web_search
+  - Total Questions: N
+  - Questions using KB content: [number] ([percentage]%)
+  - Questions using Web content: [number] ([percentage]%)
+  - Multi-source questions (all 3): [number] ([percentage]%)
+  - Projects Referenced: [list]
+  - Technologies Referenced: [list]
 
-  ## Important Rules:
+  ---
 
-  1. **ALWAYS call candidate_analysis FIRST** with both resume and job profile
-  2. **ALWAYS call kb_search** based on the analysis
-  3. **Generate EXACTLY the number of questions requested**
-  4. **Include ideal answers for EVERY question** (this is critical for evaluation)
-  5. **Match difficulty to candidate's level** (from analysis)
-  6. **EVERY question MUST reference specific candidate projects, companies, or achievements**
-  7. **ZERO generic textbook questions allowed**
-  8. **Use candidate's name, project names, company names in questions**
-  9. **Ideal answers must reflect what THIS candidate should know from THEIR experience**
-  10. **Questions must help assess if candidate actually did the work they claim**
+  ## IMPORTANT RULES:
 
-  ## Verification Checklist (Before Returning Questions):
+  1. **ALWAYS call all three agents** (candidate_analysis, kb_search, web_search)
+  2. **ACTUALLY READ AND USE the results** - Don't just call them and ignore results
+  3. **At least 60% of questions MUST use all three sources** (KB + Web + Resume)
+  4. **MUST include "Sources Used:" for EVERY question** showing what you picked from KB, Web, Resume
+  5. **MUST include Metadata section** at the end with percentages
+  6. **Generate EXACTLY N questions** as requested
+  7. **Include ideal answers for EVERY question**
+  8. **Every question MUST reference specific candidate projects/companies/achievements**
+  9. **Match difficulty to candidate's level**
+  10. **Blend sources NATURALLY** - avoid repetitive "2024" mentions
 
-  For EACH question, verify:
-  - [ ] Does it mention a specific project name or company from the resume?
-  - [ ] Does it reference actual technologies the candidate used?
-  - [ ] Does it include measurable results from their experience?
-  - [ ] Could this question ONLY be answered well by THIS candidate?
-  - [ ] Would a random ML engineer struggle to answer without this candidate's specific experience?
-  - [ ] **Did I use the question patterns provided by candidate_analysis agent?**
-  - [ ] **Does the question match the "Assessment Goal" from the pattern?**
-  - [ ] **Does it follow GOOD patterns and avoid BAD patterns from Question Generation Guidance?**
+  ## FINAL VERIFICATION (Before Submitting):
 
-  If any question fails these checks, REWRITE it to be more personalized.
+  Count your questions and verify:
+  - [ ] How many use KB content? (Must be ≥70%)
+  - [ ] How many use Web content? (Must be ≥70%)
+  - [ ] How many use all three sources? (Must be ≥60%)
+  - [ ] Do ALL questions reference specific projects/companies? (Must be 100%)
+  - [ ] Did I include "Sources Used:" for each question?
+  - [ ] Did I include the Metadata section at the end?
+  - [ ] Did I avoid spamming "2024" in every question?
 
-  REMEMBER: The interviewer wants to verify this candidate actually did the work they claim. Generic
-  questions are USELESS for this purpose!
+  If any fails, REWRITE questions until requirements are met.
+
+  **REMEMBER:** Your PRIMARY job is to create intelligent (KB), updated (Web), and personalized (Resume) 
+  questions. Generic resume-only questions are USELESS and will be REJECTED. Questions that spam "2024" sound       
+  unnatural and will be REJECTED.
+
+  **MANDATORY:** Review the KB search and Web search results you received. Pick specific concepts and trends        
+  from them. Use them in your questions. Include the "Sources Used:" section to prove you used them.
 """,
 
     # Evaluation Pipeline (unchanged)
@@ -1087,6 +1123,7 @@ def create_candidate_analysis_agent(
 
 def create_kb_search_agent(
     llm: ChatOpenAI,
+    kb_manager: Optional[KnowledgeBaseManager] = None,
     langfuse_client: Optional[Langfuse] = None,
     langfuse_handler: Optional[CallbackHandler] = None,
     prompt_label: str = "production"
@@ -1095,85 +1132,103 @@ def create_kb_search_agent(
     Create KB Search Agent (Deep Agent with multiple search tools).
 
     This agent has 3 tools for knowledge base search:
-    - vector_search (semantic similarity)
-    - keyword_search (exact match)
-    - topic_lookup (category-based)
+    - vector_search (semantic similarity) - REAL FAISS search
+    - keyword_search (exact match) - REAL FAISS search
+    - topic_lookup (category-based) - REAL FAISS search with domain filter
+
+    Args:
+        llm: The LLM model
+        kb_manager: Knowledge Base Manager instance with FAISS vector store
+        langfuse_client: Optional Langfuse client
+        langfuse_handler: Optional Langfuse callback handler
+        prompt_label: Prompt label for Langfuse
     """
     logger.info("Creating KB Search Agent (Deep Agent)...")
+
+    # Initialize KB manager if not provided
+    if kb_manager is None:
+        logger.warning("No KB manager provided. Initializing new instance...")
+        kb_manager = KnowledgeBaseManager()
 
     # Create tools for this agent
     @tool
     def vector_search(query: str) -> str:
         """
-        Search vector database using semantic similarity.
+        Search vector database using semantic similarity (REAL FAISS SEARCH).
 
-        Finds questions and topics semantically similar to the query.
-        Uses embeddings to find related content even with different wording.
+        Performs semantic search over company documents using FAISS vector database.
+        Uses OpenAI text-embedding-3-small for embeddings.
 
         Args:
-            query: Search query describing desired topics/questions
+            query: Search query describing desired topics/content
 
         Returns:
-            Similar questions and topics from knowledge base
+            Relevant passages from company documents with similarity scores
         """
         try:
-            # TODO: Implement actual vector search with vector DB
-            # For now, simulate with LLM
-            prompt = FALLBACK_PROMPTS.get("vector_search", "")
-            messages = [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"Find similar questions for: {query}"}
-            ]
+            logger.info(f"Performing FAISS vector search: '{query[:50]}...'")
 
-            if langfuse_handler:
-                config = RunnableConfig(
-                    callbacks=[langfuse_handler],
-                    tags=["vector_search", "kb_search_tool", "deep_agent"],
-                    metadata={"tool_type": "vector_search"}
-                )
-                response = llm.invoke(messages, config=config)
-            else:
-                response = llm.invoke(messages)
+            # Perform real FAISS semantic search
+            results = kb_manager.search(query, k=5)
 
-            logger.info("Vector search completed")
-            return response.content
+            if not results:
+                logger.warning("No results found in knowledge base")
+                return "No relevant documents found in knowledge base. The knowledge base may be empty or the query may not match any indexed content."
+
+            # Format results for the agent
+            formatted_output = "### Knowledge Base Search Results\n\n"
+            for i, result in enumerate(results, 1):
+                formatted_output += f"**Result {i}** (Similarity: {result['similarity_score']:.3f})\n"
+                formatted_output += f"Source: {result['metadata'].get('filename', 'Unknown')}\n"
+                formatted_output += f"Domain: {result['metadata'].get('domain', 'general')}\n"
+                formatted_output += f"Content:\n{result['content']}\n\n"
+                formatted_output += "---\n\n"
+
+            logger.info(f"FAISS vector search completed: {len(results)} results found")
+            return formatted_output
+
         except Exception as e:
-            logger.error(f"Error in vector search: {e}")
-            return f"Error: {str(e)}"
+            logger.error(f"Error in FAISS vector search: {e}")
+            return f"Error performing vector search: {str(e)}"
 
     @tool
     def keyword_search(keywords: str) -> str:
         """
-        Search knowledge base by exact keywords.
+        Search knowledge base by keywords using semantic search (REAL FAISS SEARCH).
 
-        Finds content matching specific keywords or technologies.
+        Finds content matching specific keywords or technologies using FAISS.
         Use for precise technology names, frameworks, or concepts.
 
         Args:
-            keywords: Comma-separated keywords to search for
+            keywords: Keywords to search for (space or comma-separated)
 
         Returns:
             Matching content from knowledge base
         """
         try:
-            prompt = FALLBACK_PROMPTS.get("keyword_search", "")
-            messages = [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"Search for keywords: {keywords}"}
-            ]
+            # Clean up keywords
+            query = keywords.replace(',', ' ').strip()
+            logger.info(f"Performing FAISS keyword search: '{query}'")
 
-            if langfuse_handler:
-                config = RunnableConfig(
-                    callbacks=[langfuse_handler],
-                    tags=["keyword_search", "kb_search_tool", "deep_agent"],
-                    metadata={"tool_type": "keyword_search"}
-                )
-                response = llm.invoke(messages, config=config)
-            else:
-                response = llm.invoke(messages)
+            # Use FAISS semantic search (it handles keywords well too)
+            results = kb_manager.search(query, k=5)
 
-            logger.info("Keyword search completed")
-            return response.content
+            if not results:
+                logger.warning("No results found for keywords")
+                return f"No documents found matching keywords: {keywords}"
+
+            # Format results
+            formatted_output = f"### Keyword Search Results for: {keywords}\n\n"
+            for i, result in enumerate(results, 1):
+                formatted_output += f"**Match {i}** (Relevance: {result['similarity_score']:.3f})\n"
+                formatted_output += f"Source: {result['metadata'].get('filename', 'Unknown')}\n"
+                formatted_output += f"Domain: {result['metadata'].get('domain', 'general')}\n"
+                formatted_output += f"Content:\n{result['content']}\n\n"
+                formatted_output += "---\n\n"
+
+            logger.info(f"FAISS keyword search completed: {len(results)} results")
+            return formatted_output
+
         except Exception as e:
             logger.error(f"Error in keyword search: {e}")
             return f"Error: {str(e)}"
@@ -1181,36 +1236,63 @@ def create_kb_search_agent(
     @tool
     def topic_lookup(topic: str) -> str:
         """
-        Find question templates by topic category.
+        Find content by topic/domain using FAISS search with domain filtering.
 
-        Retrieves pre-defined question templates for specific topics.
-        Topics include: algorithms, databases, system design, OOP, etc.
+        Searches company documents filtered by domain category.
+        Topics/domains include: ai_ml, devops, backend, frontend, general, etc.
 
         Args:
-            topic: Topic category to look up
+            topic: Topic/domain to search in (e.g., "ai_ml", "devops", "RAG systems")
 
         Returns:
-            Question templates and examples for the topic
+            Relevant content from the specified topic/domain
         """
         try:
-            prompt = FALLBACK_PROMPTS.get("topic_lookup", "")
-            messages = [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"Find questions for topic: {topic}"}
-            ]
+            logger.info(f"Performing FAISS topic lookup: '{topic}'")
 
-            if langfuse_handler:
-                config = RunnableConfig(
-                    callbacks=[langfuse_handler],
-                    tags=["topic_lookup", "kb_search_tool", "deep_agent"],
-                    metadata={"tool_type": "topic_lookup"}
-                )
-                response = llm.invoke(messages, config=config)
-            else:
-                response = llm.invoke(messages)
+            # Map common topic names to domains
+            domain_mapping = {
+                'ai': 'ai_ml',
+                'ml': 'ai_ml',
+                'machine learning': 'ai_ml',
+                'artificial intelligence': 'ai_ml',
+                'backend': 'backend',
+                'frontend': 'frontend',
+                'devops': 'devops',
+                'infrastructure': 'devops'
+            }
 
-            logger.info("Topic lookup completed")
-            return response.content
+            # Try to detect domain from topic
+            domain = None
+            topic_lower = topic.lower()
+            for key, value in domain_mapping.items():
+                if key in topic_lower:
+                    domain = value
+                    break
+
+            # Perform FAISS search with optional domain filter
+            results = kb_manager.search(topic, k=5, domain=domain)
+
+            if not results:
+                logger.warning(f"No results found for topic: {topic}")
+                return f"No content found for topic: {topic}. The knowledge base may not have documents in this domain."
+
+            # Format results
+            formatted_output = f"### Topic Lookup: {topic}\n"
+            if domain:
+                formatted_output += f"Domain Filter: {domain}\n"
+            formatted_output += "\n"
+
+            for i, result in enumerate(results, 1):
+                formatted_output += f"**Content {i}** (Relevance: {result['similarity_score']:.3f})\n"
+                formatted_output += f"Source: {result['metadata'].get('filename', 'Unknown')}\n"
+                formatted_output += f"Domain: {result['metadata'].get('domain', 'general')}\n"
+                formatted_output += f"Content:\n{result['content']}\n\n"
+                formatted_output += "---\n\n"
+
+            logger.info(f"FAISS topic lookup completed: {len(results)} results")
+            return formatted_output
+
         except Exception as e:
             logger.error(f"Error in topic lookup: {e}")
             return f"Error: {str(e)}"
@@ -1266,20 +1348,74 @@ def create_web_search_agent(
     @tool
     def web_search(query: str) -> str:
         """
-        Search the web for current information.
+        Search the web for current information using Tavily API.
 
         Searches for latest information about technologies, trends, and best practices.
-        Returns current web content relevant to the query.
+        Falls back to LLM simulation if Tavily is unavailable.
 
         Args:
             query: Search query
 
         Returns:
-            Relevant web content and links
+            Relevant web content and links in structured format
         """
         try:
-            # TODO: Implement actual web search with Tavily/DuckDuckGo
-            # For now, simulate with LLM
+            # Try Tavily API if available
+            if TAVILY_AVAILABLE:
+                tavily_api_key = os.getenv("TAVILY_API_KEY")
+
+                if tavily_api_key and tavily_api_key != "your_tavily_api_key_here":
+                    try:
+                        logger.info(f"Searching web with Tavily: {query[:50]}...")
+
+                        # Initialize Tavily client
+                        tavily_client = TavilyClient(api_key=tavily_api_key)
+
+                        # Perform search (max 5 results)
+                        search_results = tavily_client.search(
+                            query=query,
+                            max_results=5,
+                            include_raw_content=False,  # Don't need full HTML
+                            include_answer=True  # Get AI-generated answer
+                        )
+
+                        # Format results
+                        formatted_results = []
+
+                        # Add AI-generated answer if available
+                        if search_results.get('answer'):
+                            formatted_results.append(f"**Summary:** {search_results['answer']}\n")
+
+                        # Add individual results
+                        formatted_results.append("**Sources:**\n")
+                        for idx, result in enumerate(search_results.get('results', []), 1):
+                            title = result.get('title', 'No title')
+                            url = result.get('url', '')
+                            content = result.get('content', '')
+
+                            formatted_results.append(
+                                f"{idx}. **{title}**\n"
+                                f"   URL: {url}\n"
+                                f"   {content[:300]}...\n"
+                            )
+
+                        result_text = '\n'.join(formatted_results)
+
+                        logger.info(f"Tavily search completed: {len(search_results.get('results', []))} results")
+                        return result_text
+
+                    except Exception as tavily_error:
+                        logger.warning(f"Tavily API error: {tavily_error}. Falling back to LLM simulation.")
+                        # Fall through to LLM fallback
+                else:
+                    logger.warning("Tavily API key not configured. Falling back to LLM simulation.")
+                    # Fall through to LLM fallback
+            else:
+                logger.warning("Tavily library not installed. Falling back to LLM simulation.")
+                # Fall through to LLM fallback
+
+            # Fallback: LLM simulation (original implementation)
+            logger.info(f"Using LLM simulation for web search: {query[:50]}...")
             prompt = FALLBACK_PROMPTS.get("web_search", "")
             messages = [
                 {"role": "system", "content": prompt},
@@ -1289,18 +1425,21 @@ def create_web_search_agent(
             if langfuse_handler:
                 config = RunnableConfig(
                     callbacks=[langfuse_handler],
-                    tags=["web_search", "web_search_tool", "deep_agent"],
-                    metadata={"tool_type": "web_search"}
+                    tags=["web_search", "web_search_tool", "deep_agent", "llm_fallback"],
+                    metadata={"tool_type": "web_search", "mode": "llm_fallback"}
                 )
                 response = llm.invoke(messages, config=config)
             else:
                 response = llm.invoke(messages)
 
-            logger.info("Web search completed")
-            return response.content
+            result_text = response.content
+
+            logger.info("Web search completed (LLM fallback)")
+            return result_text
+
         except Exception as e:
             logger.error(f"Error in web search: {e}")
-            return f"Error: {str(e)}"
+            return f"Error performing web search: {str(e)}"
 
     @tool
     def extract_trends(content: str) -> str:
@@ -1409,6 +1548,7 @@ def create_web_search_agent(
 
 def create_question_answer_generator_agent(
     llm: ChatOpenAI,
+    kb_manager: Optional[KnowledgeBaseManager] = None,
     langfuse_client: Optional[Langfuse] = None,
     langfuse_handler: Optional[CallbackHandler] = None,
     prompt_label: str = "production"
@@ -1418,10 +1558,17 @@ def create_question_answer_generator_agent(
 
     This agent has 3 SUB-AGENTS as tools:
     - Candidate Analysis Agent
-    - KB Search Agent (Deep Agent)
+    - KB Search Agent (Deep Agent) - Uses REAL FAISS vector search
     - Web Search Agent (Deep Agent)
 
     These sub-agents are intelligent and can use their own tools!
+
+    Args:
+        llm: The LLM model
+        kb_manager: Knowledge Base Manager with FAISS vector store
+        langfuse_client: Optional Langfuse client
+        langfuse_handler: Optional Langfuse callback handler
+        prompt_label: Prompt label for Langfuse
     """
     logger.info("Creating Question & Answer Generator Agent...")
 
@@ -1430,7 +1577,7 @@ def create_question_answer_generator_agent(
         llm, langfuse_client, langfuse_handler, prompt_label
     )
     kb_search_agent = create_kb_search_agent(
-        llm, langfuse_client, langfuse_handler, prompt_label
+        llm, kb_manager, langfuse_client, langfuse_handler, prompt_label
     )
     web_search_agent = create_web_search_agent(
         llm, langfuse_client, langfuse_handler, prompt_label

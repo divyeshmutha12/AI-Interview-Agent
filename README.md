@@ -8,8 +8,8 @@ Built with **LangChain Supervisor Pattern**:
 - **Supervisor Agent**: Routes requests to specialized agents
 - **Question Generator Agent**: Generates interview questions with ideal answers
   - Candidate Analysis Agent
-  - KB Search Agent
-  - Web Search Agent
+  - KB Search Agent 
+  - Web Search Agent 
 - **Evaluation Pipeline**: 4-stage sequential evaluation system
 
 ## 🚀 Setup Instructions
@@ -17,6 +17,7 @@ Built with **LangChain Supervisor Pattern**:
 ### Prerequisites
 - Python 3.13+
 - OpenAI API Key
+- Tavily API Key 
 - Langfuse Account (optional, for observability)
 
 ### Installation
@@ -52,13 +53,31 @@ cp .env.example .env
 
 Then edit `.env` and add your API keys:
 ```
-OPENAI_API_KEY=your_actual_key_here
-LANGFUSE_SECRET_KEY=your_langfuse_secret_key
-LANGFUSE_PUBLIC_KEY=your_langfuse_public_key
-LANGFUSE_PROMPT_LABEL=your_name
+# OpenAI Configuration (Required)
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_MODEL=gpt-4o-mini
+
+# OpenAI Embeddings for Knowledge Base (Required)
+EMBEDDING_MODEL=text-embedding-3-small
+
+# Langfuse Configuration (Optional)
+LANGFUSE_SECRET_KEY=your_langfuse_secret_key_here
+LANGFUSE_PUBLIC_KEY=your_langfuse_public_key_here
+LANGFUSE_HOST=https://cloud.langfuse.com
+LANGFUSE_PROMPT_LABEL=divyesh
+
+# Tavily Web Search (Optional but Recommended)
+TAVILY_API_KEY=your_tavily_api_key_here
 ```
 
-**⚠️ NEVER commit `.env` file!**
+5. **Get Tavily API Key (Optional but Recommended)**
+
+The Web Search Agent uses Tavily API for real-time web searches:
+- Visit [https://tavily.com](https://tavily.com)
+- Sign up for a free account
+- Get your API key (1000 searches/month free)
+- Add it to `.env` as `TAVILY_API_KEY`
+
 
 ## 💻 Usage
 
@@ -83,9 +102,11 @@ Supervisor_Agent/
 │   │   ├── sub_agents.py            # Sub-agents & evaluation pipeline
 │   │   └── agent_service.py         # Service orchestration
 │   ├── utils/
-│   │   └── document_parser.py       # PDF/DOCX/TXT parsing
+│   │   ├── document_parser.py       # PDF/DOCX/TXT parsing
+│   │   └── knowledge_base_manager.py # FAISS KB manager
 │   └── run_interview.py             # CLI interface
-├── web_app.py                       # Streamlit web interface
+├── web_app.py                       # Streamlit web interface (with KB management)
+├── knowledge_base/                  # FAISS vector database (auto-created)
 ├── requirements.txt                 # Python dependencies
 ├── .env.example                     # Environment template
 └── README.md                        # This file
@@ -95,7 +116,9 @@ Supervisor_Agent/
 
 - **LangChain** - Agent orchestration
 - **LangGraph** - Workflow management
-- **OpenAI** - GPT-4o-mini for LLM
+- **OpenAI** - GPT-4o-mini for LLM, text-embedding-3-small for embeddings
+- **FAISS** - Vector database for semantic search
+- **Tavily** - Real-time web search API
 - **Langfuse** - Observability & prompt management
 - **Streamlit** - Web interface
 - **PyMuPDF** - Fast PDF parsing (with pdfplumber fallback)
@@ -174,7 +197,29 @@ git push origin feature/evaluation-improvements
 
 View traces and logs at: [Langfuse Dashboard](https://cloud.langfuse.com)
 
+---
+
 ## 🐛 Troubleshooting
+
+### Knowledge Base Issues
+If KB Search returns no results:
+1. **Check if documents are indexed:**
+   - Go to "📚 Knowledge Base" tab in web UI
+   - View statistics at top (should show document count > 0)
+2. **Add documents:**
+   - Upload documents via "📚 Knowledge Base" tab
+   - Select appropriate domain
+   - Verify successful indexing message
+3. **Test search:**
+   - Use search feature in "📚 Knowledge Base" tab
+   - Try different queries or domains
+
+### Tavily API Issues
+If web search isn't working:
+1. Check that `TAVILY_API_KEY` is set in `.env`
+2. Verify API key is valid at [tavily.com](https://tavily.com)
+3. Check API quota (1000 free searches/month)
+4. System will automatically fall back to LLM simulation if Tavily unavailable
 
 ### Langfuse Connection Errors
 If you see OpenTelemetry errors, these are non-blocking. The app will continue to work without telemetry.

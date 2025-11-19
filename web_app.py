@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ai_interviewer.agents.agent_service import AgentService
 from ai_interviewer.utils.document_parser import DocumentParser
+from ai_interviewer.utils.knowledge_base_manager import KnowledgeBaseManager
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -87,14 +88,16 @@ st.markdown("""
 
 @st.cache_resource
 def initialize_services():
-    """Initialize agent service and document parser (cached)"""
+    """Initialize agent service, document parser, and KB manager (cached)"""
     try:
         agent_service = AgentService()
         doc_parser = DocumentParser()  # Uses PyMuPDF by default
-        return agent_service, doc_parser, None
+        # Use the SAME KB manager instance as the AgentService
+        kb_manager = agent_service.kb_manager
+        return agent_service, doc_parser, kb_manager, None
     except Exception as e:
         logger.error(f"Failed to initialize services: {e}")
-        return None, None, str(e)
+        return None, None, None, str(e)
 
 
 def save_uploaded_file(uploaded_file) -> str:
@@ -127,7 +130,7 @@ def main():
 
     # Initialize services
     with st.spinner("Initializing AI agents..."):
-        agent_service, doc_parser, init_error = initialize_services()
+        agent_service, doc_parser, kb_manager, init_error = initialize_services()
 
     if init_error:
         st.error(f"Failed to initialize services: {init_error}")
@@ -163,7 +166,7 @@ def main():
         st.markdown("[View Traces in Langfuse](https://cloud.langfuse.com)")
 
     # Main tabs
-    tab1, tab2 = st.tabs(["📤 Upload & Generate", "✅ Evaluate Answer"])
+    tab1, tab2, tab3 = st.tabs(["📤 Upload & Generate", "✅ Evaluate Answer", "📚 Knowledge Base"])
 
     # ===== TAB 1: Upload & Generate =====
     with tab1:
@@ -355,6 +358,201 @@ def main():
                 except Exception as e:
                     st.error(f"❌ Error evaluating answer: {str(e)}")
                     logger.error(f"Evaluation error: {e}", exc_info=True)
+
+    # ===== TAB 3: Knowledge Base Management =====
+    with tab3:
+        st.header("📚 Knowledge Base Management")
+
+        st.markdown("""
+        Upload company-specific documents (technical guides, best practices, standards) to the knowledge base.
+        These documents will be semantically searched when generating interview questions.
+        """)
+
+        # Show KB Statistics
+        st.subheader("📊 Current Statistics")
+        try:
+            stats = kb_manager.get_stats()
+
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.markdown("**Total Documents**")
+                st.markdown(stats['total_documents'])
+            with col2:
+                st.markdown("**Total Chunks**")
+                st.markdown(stats['total_chunks'])
+            with col3:
+                st.markdown("**Domains**")
+                st.markdown(len(stats['domains']))
+            with col4:
+                st.markdown("**Embedding Model**")
+                st.write("text-embedding-3-small")
+
+            if stats['domains']:
+                with st.expander("📂 View Indexed Files by Domain"):
+                    # Get domain breakdown from metadata
+                    for domain, files in kb_manager.metadata.get('domains', {}).items():
+                        st.markdown(f"**{domain.upper()}** ({len(files)} files)")
+                        for file_path in files:
+                            file_name = Path(file_path).name
+                            st.text(f"  • {file_name}")
+
+        except Exception as e:
+            st.error(f"Error loading KB statistics: {e}")
+
+        st.markdown("---")
+
+        # Upload Documents Section
+        st.subheader("📤 Upload Documents to Knowledge Base")
+
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            uploaded_kb_files = st.file_uploader(
+                "Upload Documents (PDF, DOCX, TXT)",
+                type=['pdf', 'docx', 'txt'],
+                accept_multiple_files=True,
+                help="Upload company documents to add to the knowledge base",
+                key="kb_upload"
+            )
+
+        with col2:
+            domain_options = ["ai_ml", "devops", "backend", "frontend", "general", "custom"]
+            selected_domain = st.selectbox(
+                "Select Domain",
+                domain_options,
+                help="Category for these documents"
+            )
+
+            if selected_domain == "custom":
+                custom_domain = st.text_input("Custom Domain Name", placeholder="e.g., security")
+                domain = custom_domain if custom_domain else "general"
+            else:
+                domain = selected_domain
+
+        if uploaded_kb_files and st.button("🚀 Add to Knowledge Base", type="primary", use_container_width=True):
+            try:
+                with st.spinner("Processing and indexing documents..."):
+                    total_chunks = 0
+                    success_count = 0
+
+                    for uploaded_file in uploaded_kb_files:
+                        try:
+                            # Save file temporarily
+                            file_path = save_uploaded_file(uploaded_file)
+
+                            # Add to knowledge base
+                            chunks = kb_manager.add_document(
+                                file_path=file_path,
+                                domain=domain
+                            )
+
+                            total_chunks += chunks
+                            success_count += 1
+
+                            st.success(f"✅ {uploaded_file.name}: {chunks} chunks indexed")
+
+                        except Exception as e:
+                            st.error(f"❌ Failed to index {uploaded_file.name}: {str(e)}")
+                            logger.error(f"Error indexing {uploaded_file.name}: {e}")
+                            continue
+
+                    if success_count > 0:
+                        st.success(f"🎉 Successfully indexed {success_count} documents ({total_chunks} chunks) in domain: {domain}")
+
+                        # Refresh statistics
+                        st.rerun()
+
+            except Exception as e:
+                st.error(f"❌ Error processing documents: {str(e)}")
+                logger.error(f"KB upload error: {e}", exc_info=True)
+
+        st.markdown("---")
+
+        # Search Knowledge Base Section
+        st.subheader("🔍 Search Knowledge Base")
+
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            search_query = st.text_input(
+                "Search Query",
+                placeholder="e.g., RAG implementation best practices",
+                help="Search for content in the knowledge base"
+            )
+
+        with col2:
+            search_domain = st.selectbox(
+                "Filter by Domain",
+                ["All Domains"] + list(kb_manager.metadata.get('domains', {}).keys()),
+                help="Optionally filter by domain"
+            )
+
+            search_k = st.number_input("Number of Results", min_value=1, max_value=10, value=3)
+
+        if search_query and st.button("🔍 Search", use_container_width=True):
+            try:
+                with st.spinner("Searching knowledge base..."):
+                    domain_filter = None if search_domain == "All Domains" else search_domain
+
+                    results = kb_manager.search(
+                        query=search_query,
+                        k=search_k,
+                        domain=domain_filter
+                    )
+
+                    if not results:
+                        st.warning("No results found. Try a different query or add more documents.")
+                    else:
+                        st.success(f"Found {len(results)} relevant results")
+
+                        for i, result in enumerate(results, 1):
+                            with st.expander(
+                                f"Result {i} - Similarity: {result['similarity_score']:.3f} - {result['metadata'].get('filename', 'Unknown')}",
+                                expanded=(i == 1)
+                            ):
+                                st.markdown(f"**Source:** {result['metadata'].get('filename', 'Unknown')}")
+                                st.markdown(f"**Domain:** {result['metadata'].get('domain', 'general')}")
+                                st.markdown(f"**Similarity Score:** {result['similarity_score']:.3f}")
+                                st.markdown("**Content:**")
+                                st.text(result['content'])
+
+            except Exception as e:
+                st.error(f"❌ Search error: {str(e)}")
+                logger.error(f"KB search error: {e}", exc_info=True)
+
+        # Help Section
+        with st.expander("ℹ️ How Knowledge Base Works"):
+            st.markdown("""
+            ### How It Works
+
+            1. **Upload Documents**: Add your company's technical documents (PDF, DOCX, TXT)
+            2. **Automatic Processing**: Documents are parsed, chunked, and embedded using OpenAI text-embedding-3-small
+            3. **FAISS Storage**: Embeddings stored in a FAISS vector database for fast semantic search
+            4. **Intelligent Search**: When generating questions, the system searches relevant documents
+            5. **Better Questions**: Generated questions reference your actual company knowledge and practices
+
+            ### Supported Formats
+
+            - PDF (.pdf)
+            - Microsoft Word (.docx)
+            - Plain Text (.txt)
+
+            ### Domains
+
+            Organize documents by domain for better filtering:
+            - **ai_ml**: AI/ML, data science, LLM content
+            - **devops**: DevOps, infrastructure, CI/CD
+            - **backend**: Backend development, APIs, databases
+            - **frontend**: Frontend, UI/UX, web development
+            - **general**: General technical content
+            - **custom**: Define your own domain
+
+            ### Cost
+
+            - Embedding cost: ~$0.02 per 1M tokens (OpenAI text-embedding-3-small)
+            - Search cost: FREE (local FAISS)
+            - Example: 100 documents (~5000 words each) ≈ $0.013 total
+            """)
 
 
 if __name__ == "__main__":

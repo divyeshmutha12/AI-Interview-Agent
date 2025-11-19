@@ -61,6 +61,9 @@ dmypy.json
 # Streamlit
 .streamlit/
 
+# Knowledge Base (user-specific FAISS index and metadata)
+knowledge_base/
+
 # Logs
 *.log
 
